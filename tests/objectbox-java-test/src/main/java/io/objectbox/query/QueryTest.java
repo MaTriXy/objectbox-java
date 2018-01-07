@@ -20,27 +20,35 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.Date;
 import java.util.List;
+
+import javax.annotation.Nullable;
 
 import io.objectbox.AbstractObjectBoxTest;
 import io.objectbox.Box;
+import io.objectbox.BoxStoreBuilder;
+import io.objectbox.DebugFlags;
 import io.objectbox.TestEntity;
+import io.objectbox.TestEntity_;
+import io.objectbox.TxCallback;
 import io.objectbox.query.QueryBuilder.StringOrder;
+import io.objectbox.relation.MyObjectBox;
+import io.objectbox.relation.Order;
+import io.objectbox.relation.Order_;
 
-
-import static io.objectbox.TestEntity_.simpleBoolean;
-import static io.objectbox.TestEntity_.simpleFloat;
-import static io.objectbox.TestEntity_.simpleInt;
-import static io.objectbox.TestEntity_.simpleLong;
-import static io.objectbox.TestEntity_.simpleShort;
-import static io.objectbox.TestEntity_.simpleString;
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
+import static io.objectbox.TestEntity_.*;
+import static org.junit.Assert.*;
 
 public class QueryTest extends AbstractObjectBoxTest {
 
     private Box<TestEntity> box;
+
+    @Override
+    protected BoxStoreBuilder createBoxStoreBuilder(boolean withIndex) {
+        return super.createBoxStoreBuilder(withIndex).debugFlags(DebugFlags.LOG_QUERY_PARAMETERS);
+    }
 
     @Before
     public void setUpBox() {
@@ -51,6 +59,30 @@ public class QueryTest extends AbstractObjectBoxTest {
     public void testBuild() {
         Query query = box.query().build();
         assertNotNull(query);
+    }
+
+    @Test(expected = IllegalStateException.class)
+    public void testBuildTwice() {
+        QueryBuilder<TestEntity> queryBuilder = box.query();
+        for (int i = 0; i < 2; i++) {
+            // calling any builder method after build should fail
+            // note: not calling all variants for different types
+            queryBuilder.isNull(TestEntity_.simpleString);
+            queryBuilder.and();
+            queryBuilder.notNull(TestEntity_.simpleString);
+            queryBuilder.or();
+            queryBuilder.equal(TestEntity_.simpleBoolean, true);
+            queryBuilder.notEqual(TestEntity_.simpleBoolean, true);
+            queryBuilder.less(TestEntity_.simpleInt, 42);
+            queryBuilder.greater(TestEntity_.simpleInt, 42);
+            queryBuilder.between(TestEntity_.simpleInt, 42, 43);
+            queryBuilder.in(TestEntity_.simpleInt, new int[]{42});
+            queryBuilder.notIn(TestEntity_.simpleInt, new int[]{42});
+            queryBuilder.contains(TestEntity_.simpleString, "42");
+            queryBuilder.startsWith(TestEntity_.simpleString, "42");
+            queryBuilder.order(TestEntity_.simpleInt);
+            queryBuilder.build().find();
+        }
     }
 
     @Test
@@ -167,6 +199,17 @@ public class QueryTest extends AbstractObjectBoxTest {
         assertEquals(400.1, query.maxDouble(simpleFloat), 0.001);
         assertEquals(4001, query.sum(simpleInt), 0.0001);
         assertEquals(800.1, query.sumDouble(simpleFloat), 0.001);
+    }
+
+    @Test
+    public void testSumDoubleOfFloats() {
+        TestEntity entity = new TestEntity();
+        entity.setSimpleFloat(0);
+        TestEntity entity2 = new TestEntity();
+        entity2.setSimpleFloat(-2.05f);
+        box.put(entity, entity2);
+        double sum = box.query().build().sumDouble(simpleFloat);
+        assertEquals(-2.05, sum, 0.0001);
     }
 
     @Test
@@ -420,6 +463,62 @@ public class QueryTest extends AbstractObjectBoxTest {
         assertEquals(2, entities.size());
         assertEquals("apple", entities.get(0).getSimpleString());
         assertEquals("banana milk shake", entities.get(1).getSimpleString());
+    }
+
+    @Test
+    public void testFindWithComparator() {
+        putTestEntitiesStrings();
+        List<TestEntity> entities = box.query().sort(new Comparator<TestEntity>() {
+            @Override
+            public int compare(TestEntity o1, TestEntity o2) {
+                return o1.getSimpleString().substring(1).compareTo(o2.getSimpleString().substring(1));
+            }
+        }).build().find();
+        assertEquals(5, entities.size());
+        assertEquals("banana", entities.get(0).getSimpleString());
+        assertEquals("banana milk shake", entities.get(1).getSimpleString());
+        assertEquals("bar", entities.get(2).getSimpleString());
+        assertEquals("foo bar", entities.get(3).getSimpleString());
+        assertEquals("apple", entities.get(4).getSimpleString());
+    }
+
+    @Test
+    // TODO can we improve? More than just "still works"?
+    public void testQueryAttempts() {
+        store.close();
+        BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(false)).directory(boxStoreDir)
+                .queryAttempts(5)
+                .failedReadTxAttemptCallback(new TxCallback() {
+                    @Override
+                    public void txFinished(@Nullable Object result, @Nullable Throwable error) {
+                        error.printStackTrace();
+                    }
+                });
+        builder.entity(new TestEntity_());
+
+        store = builder.build();
+        putTestEntitiesScalars();
+
+        Query<TestEntity> query = store.boxFor(TestEntity.class).query().equal(simpleInt, 2007).build();
+        assertEquals(2007, query.findFirst().getSimpleInt());
+    }
+
+    @Test
+    public void testDateParam() {
+        store.close();
+        assertTrue(store.deleteAllFiles());
+        store = MyObjectBox.builder().baseDirectory(boxStoreDir).debugFlags(DebugFlags.LOG_QUERY_PARAMETERS).build();
+
+        Date now = new Date();
+        Order order = new Order();
+        order.setDate(now);
+        Box<Order> box = store.boxFor(Order.class);
+        box.put(order);
+
+        Query<Order> query = box.query().equal(Order_.date, 0).build();
+        assertEquals(0, query.count());
+
+        query.setParameter(Order_.date, now);
     }
 
     private QueryFilter<TestEntity> createTestFilter() {

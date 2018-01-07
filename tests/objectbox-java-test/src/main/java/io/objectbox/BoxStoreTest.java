@@ -19,15 +19,13 @@ package io.objectbox;
 import org.junit.Test;
 
 import java.io.File;
+import java.util.concurrent.Callable;
+
+import javax.annotation.Nullable;
 
 import io.objectbox.exception.DbException;
 
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotSame;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 public class BoxStoreTest extends AbstractObjectBoxTest {
 
@@ -102,6 +100,99 @@ public class BoxStoreTest extends AbstractObjectBoxTest {
         File boxStoreDir2 = new File(boxStoreDir.getAbsolutePath() + "-2");
         BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(false)).directory(boxStoreDir2);
         builder.entity(new TestEntity_());
+    }
+
+    @Test
+    public void testDeleteAllFiles() {
+        closeStoreForTest();
+    }
+
+    @Test
+    public void testDeleteAllFiles_staticDir() {
+        closeStoreForTest();
+        File boxStoreDir2 = new File(boxStoreDir.getAbsolutePath() + "-2");
+        BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(false)).directory(boxStoreDir2);
+        BoxStore store2 = builder.build();
+        store2.close();
+
+        assertTrue(boxStoreDir2.exists());
+        assertTrue(BoxStore.deleteAllFiles(boxStoreDir2));
+        assertFalse(boxStoreDir2.exists());
+    }
+
+    @Test
+    public void testDeleteAllFiles_baseDirName() {
+        closeStoreForTest();
+        File basedir = new File("test-base-dir");
+        String name = "mydb";
+        basedir.mkdir();
+        assertTrue(basedir.isDirectory());
+        File dbDir = new File(basedir, name);
+        assertFalse(dbDir.exists());
+
+        BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(false)).baseDirectory(basedir).name(name);
+        BoxStore store2 = builder.build();
+        store2.close();
+
+        assertTrue(dbDir.exists());
+        assertTrue(BoxStore.deleteAllFiles(basedir, name));
+        assertFalse(dbDir.exists());
+        assertTrue(basedir.delete());
+    }
+
+    private void closeStoreForTest() {
+        assertTrue(boxStoreDir.exists());
+        store.close();
+        assertTrue(store.deleteAllFiles());
+        assertFalse(boxStoreDir.exists());
+    }
+
+    @Test
+    public void testCallInReadTxWithRetry() {
+        final int[] countHolder = {0};
+        String value = store.callInReadTxWithRetry(createTestCallable(countHolder), 5, 0, true);
+        assertEquals("42", value);
+        assertEquals(5, countHolder[0]);
+    }
+
+    @Test(expected = DbException.class)
+    public void testCallInReadTxWithRetry_fail() {
+        final int[] countHolder = {0};
+        store.callInReadTxWithRetry(createTestCallable(countHolder), 4, 0, true);
+    }
+
+    @Test
+    public void testCallInReadTxWithRetry_callback() {
+        closeStoreForTest();
+        final int[] countHolder = {0};
+        final int[] countHolderCallback = {0};
+
+        BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(false)).directory(boxStoreDir)
+                .failedReadTxAttemptCallback(new TxCallback() {
+                    @Override
+                    public void txFinished(@Nullable Object result, @Nullable Throwable error) {
+                        assertNotNull(error);
+                        countHolderCallback[0]++;
+                    }
+                });
+        store = builder.build();
+        String value = store.callInReadTxWithRetry(createTestCallable(countHolder), 5, 0, true);
+        assertEquals("42", value);
+        assertEquals(5, countHolder[0]);
+        assertEquals(4, countHolderCallback[0]);
+    }
+
+    private Callable<String> createTestCallable(final int[] countHolder) {
+        return new Callable<String>() {
+            @Override
+            public String call() throws Exception {
+                int count = ++countHolder[0];
+                if (count < 5) {
+                    throw new DbException("Count: " + count);
+                }
+                return "42";
+            }
+        };
     }
 
 }

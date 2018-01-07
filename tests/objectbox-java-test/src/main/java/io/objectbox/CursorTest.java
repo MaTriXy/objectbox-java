@@ -23,13 +23,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 public class CursorTest extends AbstractObjectBoxTest {
 
@@ -64,7 +58,7 @@ public class CursorTest extends AbstractObjectBoxTest {
             cursor.put(entity);
         } finally {
             cursor.close();
-            transaction.abort();
+            transaction.close();
         }
     }
 
@@ -107,7 +101,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         // and find via index
         assertEquals(key, cursor.lookupKeyUsingIndex(9, value1));
-        assertEquals(key, cursor.find("simpleString", value1).get(0).getId());
+        assertEquals(key, cursor.find(TestEntity_.simpleString, value1).get(0).getId());
 
         // change entity values
         String value2 = "lala123";
@@ -118,10 +112,10 @@ public class CursorTest extends AbstractObjectBoxTest {
         cursor.put(entityRead);
 
         // indexes ok?
-        assertEquals(0, cursor.find("simpleString", value1).size());
+        assertEquals(0, cursor.find(TestEntity_.simpleString, value1).size());
         assertEquals(0, cursor.lookupKeyUsingIndex(9, value1));
 
-        assertEquals(key, cursor.find("simpleString", value2).get(0).getId());
+        assertEquals(key, cursor.find(TestEntity_.simpleString, value2).get(0).getId());
 
         // get the changed entity
         entityRead = cursor.get(key);
@@ -136,8 +130,8 @@ public class CursorTest extends AbstractObjectBoxTest {
         cursor.deleteEntity(key);
 
         // not in any index anymore
-        assertEquals(0, cursor.find("simpleString", value1).size());
-        assertEquals(0, cursor.find("simpleString", value2).size());
+        assertEquals(0, cursor.find(TestEntity_.simpleString, value1).size());
+        assertEquals(0, cursor.find(TestEntity_.simpleString, value2).size());
 
         cursor.close();
         transaction.abort();
@@ -149,15 +143,19 @@ public class CursorTest extends AbstractObjectBoxTest {
         String value = "lulu321";
         entity.setSimpleString(value);
         Transaction transaction = store.beginTx();
-
-        Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
-        long key = cursor.put(entity);
-        // And again
-        entity.setSimpleInt(1977);
-        cursor.put(entity);
-        assertEquals(key, cursor.lookupKeyUsingIndex(9, value));
-        TestEntity read = cursor.get(key);
-        cursor.close();
+        TestEntity read;
+        try {
+            Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
+            long key = cursor.put(entity);
+            // And again
+            entity.setSimpleInt(1977);
+            cursor.put(entity);
+            assertEquals(key, cursor.lookupKeyUsingIndex(9, value));
+            read = cursor.get(key);
+            cursor.close();
+        } finally {
+            transaction.close();
+        }
         assertEquals(1977, read.getSimpleInt());
         assertEquals(value, read.getSimpleString());
     }
@@ -168,7 +166,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         Transaction transaction = store.beginTx();
         Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
-        TestEntity entityRead = cursor.find("simpleString", "find me").get(0);
+        TestEntity entityRead = cursor.find(TestEntity_.simpleString, "find me").get(0);
         assertNotNull(entityRead);
         assertEquals(1, entityRead.getId());
 
@@ -177,7 +175,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         transaction = store.beginTx();
         cursor = transaction.createCursor(TestEntity.class);
-        entityRead = cursor.find("simpleString", "not me").get(0);
+        entityRead = cursor.find(TestEntity_.simpleString, "not me").get(0);
         assertNotNull(entityRead);
         assertEquals(2, entityRead.getId());
 
@@ -186,7 +184,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         transaction = store.beginTx();
         cursor = transaction.createCursor(TestEntity.class);
-        assertEquals(0, cursor.find("simpleString", "non-existing").size());
+        assertEquals(0, cursor.find(TestEntity_.simpleString, "non-existing").size());
 
         cursor.close();
         transaction.abort();
@@ -205,7 +203,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         Transaction transaction = store.beginReadTx();
         Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
-        List<TestEntity> result = cursor.find("simpleInt", 2016);
+        List<TestEntity> result = cursor.find(TestEntity_.simpleInt, 2016);
         assertEquals(2, result.size());
 
         assertEquals("foo", result.get(0).getSimpleString());
@@ -264,13 +262,17 @@ public class CursorTest extends AbstractObjectBoxTest {
     @Test
     public void testClose() {
         Transaction tx = store.beginReadTx();
-        Cursor<TestEntity> cursor = tx.createCursor(TestEntity.class);
-        assertFalse(cursor.isClosed());
-        cursor.close();
-        assertTrue(cursor.isClosed());
+        try {
+            Cursor<TestEntity> cursor = tx.createCursor(TestEntity.class);
+            assertFalse(cursor.isClosed());
+            cursor.close();
+            assertTrue(cursor.isClosed());
 
-        // Double close should be fine
-        cursor.close();
+            // Double close should be fine
+            cursor.close();
+        } finally {
+            tx.close();
+        }
     }
 
     @Test
@@ -314,10 +316,9 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         Transaction transaction = store.beginReadTx();
         Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
-        transaction.close();
-        transaction = store.beginReadTx();
-        cursor.renew(transaction);
-        assertSame(transaction, cursor.getTx());
+        transaction.recycle();
+        transaction.renew();
+        cursor.renew();
         assertEquals("orange", cursor.get(1).getSimpleString());
 
         cursor.close();

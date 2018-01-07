@@ -21,6 +21,10 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
+import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.ideasonly.ModelUpdate;
 
@@ -35,7 +39,7 @@ import io.objectbox.ideasonly.ModelUpdate;
  * <ol>
  * <li>Name/location of DB: use {@link #name(String)}/{@link #baseDirectory}/{@link #androidContext(Object)}
  * OR {@link #directory(File)}(default: name "objectbox)</li>
- * <li>Max DB size: see {@link #maxSizeInKByte} (default: 512 MB)</li>
+ * <li>Max DB size: see {@link #maxSizeInKByte} (default: 1 GB)</li>
  * <li>Max readers: see {@link #maxReaders(int)} (default: 126)</li>
  * </ol>
  */
@@ -45,7 +49,7 @@ public class BoxStoreBuilder {
     public static final String DEFAULT_NAME = "objectbox";
 
     /** The default maximum size the DB can grow to, which can be overwritten using {@link #maxSizeInKByte}. */
-    public static final int DEFAULT_MAX_DB_SIZE_KBYTE = 512 * 1024;
+    public static final int DEFAULT_MAX_DB_SIZE_KBYTE = 1024 * 1024;
 
     final byte[] model;
 
@@ -58,18 +62,22 @@ public class BoxStoreBuilder {
     /** Ignored by BoxStore */
     private String name;
 
-    // 512 MB
+    /** Defaults to {@link #DEFAULT_MAX_DB_SIZE_KBYTE}. */
     long maxSizeInKByte = DEFAULT_MAX_DB_SIZE_KBYTE;
 
     ModelUpdate modelUpdate;
 
-    private boolean android;
+    int debugFlags;
 
-    boolean debugTransactions;
+    private boolean android;
 
     boolean debugRelations;
 
     int maxReaders;
+
+    int queryAttempts;
+
+    TxCallback failedReadTxAttemptCallback;
 
     final List<EntityInfo> entityInfoList = new ArrayList<>();
 
@@ -146,10 +154,45 @@ public class BoxStoreBuilder {
         if (context == null) {
             throw new NullPointerException("Context may not be null");
         }
+        File baseDir = getAndroidBaseDir(context);
+        if (!baseDir.exists()) {
+            baseDir.mkdir();
+            if (!baseDir.exists()) { // check baseDir.exists() because of potential concurrent processes
+                throw new RuntimeException("Could not init Android base dir at " + baseDir.getAbsolutePath());
+            }
+        }
+        if (!baseDir.isDirectory()) {
+            throw new RuntimeException("Android base dir is not a dir: " + baseDir.getAbsolutePath());
+        }
+        baseDirectory = baseDir;
+        android = true;
+        return this;
+    }
+
+    static File getAndroidDbDir(Object context, String dbName) {
+        File baseDir = getAndroidBaseDir(context);
+        return new File(baseDir, dbName(dbName));
+    }
+
+    private static String dbName(@Nullable String dbNameOrNull) {
+        return dbNameOrNull != null ? dbNameOrNull : DEFAULT_NAME;
+    }
+
+    static File getAndroidBaseDir(Object context) {
+        return new File(getAndroidFilesDir(context), "objectbox");
+    }
+
+    @Nonnull
+    private static File getAndroidFilesDir(Object context) {
         File filesDir;
         try {
             Method getFilesDir = context.getClass().getMethod("getFilesDir");
             filesDir = (File) getFilesDir.invoke(context);
+            if (filesDir == null) {
+                // Race condition in Android before 4.4: https://issuetracker.google.com/issues/36918154 ?
+                System.err.println("getFilesDir() returned null - retrying once...");
+                filesDir = (File) getFilesDir.invoke(context);
+            }
         } catch (Exception e) {
             throw new RuntimeException(
                     "Could not init with given Android context (must be sub class of android.content.Context)", e);
@@ -157,19 +200,10 @@ public class BoxStoreBuilder {
         if (filesDir == null) {
             throw new IllegalStateException("Android files dir is null");
         }
-        File baseDir = new File(filesDir, "objectbox");
-        if (!baseDir.exists()) {
-            boolean ok = baseDir.mkdirs();
-            if (!ok) {
-                System.err.print("Could not create base dir");
-            }
+        if (!filesDir.exists()) {
+            throw new IllegalStateException("Android files dir does not exist");
         }
-        if (!baseDir.exists() || !baseDir.isDirectory()) {
-            throw new RuntimeException("Could not init Android base dir at " + baseDir.getAbsolutePath());
-        }
-        baseDirectory = baseDir;
-        android = true;
-        return this;
+        return filesDir;
     }
 
     /**
@@ -182,13 +216,14 @@ public class BoxStoreBuilder {
      * For highly concurrent setups (e.g. you are using ObjectBox on the server side) it may make sense to increase the
      * number.
      */
+
     public BoxStoreBuilder maxReaders(int maxReaders) {
         this.maxReaders = maxReaders;
         return this;
     }
 
     @Internal
-    public <T> void entity(EntityInfo entityInfo) {
+    public void entity(EntityInfo entityInfo) {
         entityInfoList.add(entityInfo);
     }
 
@@ -201,22 +236,30 @@ public class BoxStoreBuilder {
 
     /**
      * Sets the maximum size the database file can grow to.
-     * By default this is 512 MB, which should be sufficient for most applications.
+     * By default this is 1 GB, which should be sufficient for most applications.
      * <p>
      * In general, a maximum size prevents the DB from growing indefinitely when something goes wrong
-     * (for example you insert data in an infinite look).
-     *
-     * @param maxSizeInKByte
-     * @return
+     * (for example you insert data in an infinite loop).
      */
     public BoxStoreBuilder maxSizeInKByte(long maxSizeInKByte) {
         this.maxSizeInKByte = maxSizeInKByte;
         return this;
     }
 
-    /** Enables some debug logging for transactions. */
+    @Deprecated
+    /** @deprecated Use {@link #debugFlags} instead. */
     public BoxStoreBuilder debugTransactions() {
-        this.debugTransactions = true;
+        this.debugFlags |= DebugFlags.LOG_TRANSACTIONS_READ | DebugFlags.LOG_TRANSACTIONS_WRITE;
+        return this;
+    }
+
+    /**
+     * Debug flags typically enable additional logging, see {@link DebugFlags} for valid values.
+     * <p>
+     * Example: debugFlags({@link DebugFlags#LOG_TRANSACTIONS_READ} | {@link DebugFlags#LOG_TRANSACTIONS_WRITE});
+     */
+    public BoxStoreBuilder debugFlags(int debugFlags) {
+        this.debugFlags = debugFlags;
         return this;
     }
 
@@ -227,20 +270,51 @@ public class BoxStoreBuilder {
     }
 
     /**
+     * For massive concurrent setups (app is using a lot of threads), you can enable automatic retries for queries.
+     * This can resolve situations in which resources are getting sparse (e.g.
+     * {@link io.objectbox.exception.DbMaxReadersExceededException} or other variations of
+     * {@link io.objectbox.exception.DbException} are thrown during query execution).
+     *
+     * @param queryAttempts number of attempts a query find operation will be executed before failing.
+     *                      Recommended values are in the range of 2 to 5, e.g. a value of 3 as a starting point.
+     */
+    @Experimental
+    public BoxStoreBuilder queryAttempts(int queryAttempts) {
+        if (queryAttempts < 1) {
+            throw new IllegalArgumentException("Query attempts must >= 1");
+        }
+        this.queryAttempts = queryAttempts;
+        return this;
+    }
+
+    /**
+     * Define a callback for failed read transactions during retires (see also {@link #queryAttempts(int)}).
+     * Useful for e.g. logging.
+     */
+    @Experimental
+    public BoxStoreBuilder failedReadTxAttemptCallback(TxCallback failedReadTxAttemptCallback) {
+        this.failedReadTxAttemptCallback = failedReadTxAttemptCallback;
+        return this;
+    }
+
+    /**
      * Builds a {@link BoxStore} using any given configuration.
      */
     public BoxStore build() {
         if (directory == null) {
-            if (name == null) {
-                name = DEFAULT_NAME;
-            }
-            if (baseDirectory != null) {
-                directory = new File(baseDirectory, name);
-            } else {
-                directory = new File(name);
-            }
+            name = dbName(name);
+            directory = getDbDir(baseDirectory, name);
         }
         return new BoxStore(this);
+    }
+
+    static File getDbDir(@Nullable File baseDirectoryOrNull, @Nullable String nameOrNull) {
+        String name = dbName(nameOrNull);
+        if (baseDirectoryOrNull != null) {
+            return new File(baseDirectoryOrNull, name);
+        } else {
+            return new File(name);
+        }
     }
 
     /**

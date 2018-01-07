@@ -1,6 +1,7 @@
 package io.objectbox.query;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 
@@ -8,15 +9,16 @@ import io.objectbox.Box;
 import io.objectbox.Property;
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
-import io.objectbox.model.OrderFlags;
 import io.objectbox.relation.RelationInfo;
 
 /**
  * With QueryBuilder you define custom queries returning matching entities. Using the methods of this class you can
  * select (filter) results for specific data (for example #{@link #equal(Property, String)} and
- * {@link #isNull(Property)}) and select an sort order for the resulting list (see {@link #order(Property)} and its overloads).
+ * {@link #isNull(Property)}) and select an sort order for the resulting list (see {@link #order(Property)} and its
+ * overloads).
  * <p>
- * Use {@link #build()} to conclude your query definitions and to get a {@link Query} object, which is used to actually get results.
+ * Use {@link #build()} to conclude your query definitions and to get a {@link Query} object, which is used to actually
+ * get results.
  * <p>
  * Note: Currently you can only query for complete entities. Returning individual property values or aggregates are
  * currently not available. Keep in mind that ObjectBox is very fast and the overhead to create an entity is very low.
@@ -78,56 +80,58 @@ public class QueryBuilder<T> {
 
     private QueryFilter<T> filter;
 
-    private static native long nativeCreate(long storeHandle, String entityName);
+    private Comparator<T> comparator;
 
-    private static native void nativeDestroy(long handle);
+    private native long nativeCreate(long storeHandle, String entityName);
 
-    private static native long nativeBuild(long handle);
+    private native void nativeDestroy(long handle);
 
-    private static native void nativeOrder(long handle, int propertyId, int flags);
+    private native long nativeBuild(long handle);
 
-    private static native long nativeCombine(long handle, long condition1, long condition2, boolean combineUsingOr);
+    private native void nativeOrder(long handle, int propertyId, int flags);
+
+    private native long nativeCombine(long handle, long condition1, long condition2, boolean combineUsingOr);
 
     // ------------------------------ (Not)Null------------------------------
 
-    private static native long nativeNull(long handle, int propertyId);
+    private native long nativeNull(long handle, int propertyId);
 
-    private static native long nativeNotNull(long handle, int propertyId);
+    private native long nativeNotNull(long handle, int propertyId);
 
     // ------------------------------ Integers ------------------------------
 
-    private static native long nativeEqual(long handle, int propertyId, long value);
+    private native long nativeEqual(long handle, int propertyId, long value);
 
-    private static native long nativeNotEqual(long handle, int propertyId, long value);
+    private native long nativeNotEqual(long handle, int propertyId, long value);
 
-    private static native long nativeLess(long handle, int propertyId, long value);
+    private native long nativeLess(long handle, int propertyId, long value);
 
-    private static native long nativeGreater(long handle, int propertyId, long value);
+    private native long nativeGreater(long handle, int propertyId, long value);
 
-    private static native long nativeBetween(long handle, int propertyId, long value1, long value2);
+    private native long nativeBetween(long handle, int propertyId, long value1, long value2);
 
-    private static native long nativeIn(long handle, int propertyId, int[] values, boolean negate);
+    private native long nativeIn(long handle, int propertyId, int[] values, boolean negate);
 
-    private static native long nativeIn(long handle, int propertyId, long[] values, boolean negate);
+    private native long nativeIn(long handle, int propertyId, long[] values, boolean negate);
 
     // ------------------------------ Strings ------------------------------
 
-    private static native long nativeEqual(long handle, int propertyId, String value, boolean caseSensitive);
+    private native long nativeEqual(long handle, int propertyId, String value, boolean caseSensitive);
 
-    private static native long nativeNotEqual(long handle, int propertyId, String value, boolean caseSensitive);
+    private native long nativeNotEqual(long handle, int propertyId, String value, boolean caseSensitive);
 
-    private static native long nativeContains(long handle, int propertyId, String value, boolean caseSensitive);
+    private native long nativeContains(long handle, int propertyId, String value, boolean caseSensitive);
 
-    private static native long nativeStartsWith(long handle, int propertyId, String value, boolean caseSensitive);
+    private native long nativeStartsWith(long handle, int propertyId, String value, boolean caseSensitive);
 
-    private static native long nativeEndsWith(long handle, int propertyId, String value, boolean caseSensitive);
+    private native long nativeEndsWith(long handle, int propertyId, String value, boolean caseSensitive);
 
     // ------------------------------ FPs ------------------------------
-    private static native long nativeLess(long handle, int propertyId, double value);
+    private native long nativeLess(long handle, int propertyId, double value);
 
-    private static native long nativeGreater(long handle, int propertyId, double value);
+    private native long nativeGreater(long handle, int propertyId, double value);
 
-    private static native long nativeBetween(long handle, int propertyId, double value1, double value2);
+    private native long nativeBetween(long handle, int propertyId, double value1, double value2);
 
     @Internal
     public QueryBuilder(Box<T> box, long storeHandle, String entityName) {
@@ -152,16 +156,20 @@ public class QueryBuilder<T> {
      * Builds the query and closes this QueryBuilder.
      */
     public Query<T> build() {
-        if (handle == 0) {
-            throw new IllegalStateException("This QueryBuilder has already been closed. Please use a new instance.");
-        }
+        verifyHandle();
         if (combineNextWith != Operator.NONE) {
             throw new IllegalStateException("Incomplete logic condition. Use or()/and() between two conditions only.");
         }
         long queryHandle = nativeBuild(handle);
-        Query<T> query = new Query<>(box, queryHandle, hasOrder, eagerRelations, filter);
+        Query<T> query = new Query<>(box, queryHandle, hasOrder, eagerRelations, filter, comparator);
         close();
         return query;
+    }
+
+    private void verifyHandle() {
+        if (handle == 0) {
+            throw new IllegalStateException("This QueryBuilder has already been closed. Please use a new instance.");
+        }
     }
 
     /**
@@ -206,12 +214,18 @@ public class QueryBuilder<T> {
      * @see #orderDesc(Property)
      */
     public QueryBuilder<T> order(Property property, int flags) {
+        verifyHandle();
         if (combineNextWith != Operator.NONE) {
             throw new IllegalStateException(
                     "An operator is pending. Use operators like and() and or() only between two conditions.");
         }
         nativeOrder(handle, property.getId(), flags);
         hasOrder = true;
+        return this;
+    }
+
+    public QueryBuilder<T> sort(Comparator<T> comparator) {
+        this.comparator = comparator;
         return this;
     }
 
@@ -336,161 +350,204 @@ public class QueryBuilder<T> {
     }
 
     public QueryBuilder<T> isNull(Property property) {
+        verifyHandle();
         checkCombineCondition(nativeNull(handle, property.getId()));
         return this;
     }
 
     public QueryBuilder<T> notNull(Property property) {
+        verifyHandle();
         checkCombineCondition(nativeNotNull(handle, property.getId()));
         return this;
     }
 
     public QueryBuilder<T> equal(Property property, long value) {
+        verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value));
         return this;
     }
 
     public QueryBuilder<T> equal(Property property, boolean value) {
+        verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value ? 1 : 0));
         return this;
     }
 
     /** @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead. */
     public QueryBuilder<T> equal(Property property, Date value) {
+        verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value.getTime()));
         return this;
     }
 
     public QueryBuilder<T> notEqual(Property property, long value) {
+        verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value));
         return this;
     }
 
     public QueryBuilder<T> notEqual(Property property, boolean value) {
+        verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value ? 1 : 0));
         return this;
     }
 
     /** @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead. */
     public QueryBuilder<T> notEqual(Property property, Date value) {
+        verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value.getTime()));
         return this;
     }
 
     public QueryBuilder<T> less(Property property, long value) {
+        verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value));
         return this;
     }
 
     public QueryBuilder<T> greater(Property property, long value) {
+        verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value));
         return this;
     }
 
     public QueryBuilder<T> less(Property property, Date value) {
+        verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value.getTime()));
         return this;
     }
 
     /** @throws NullPointerException if given value is null. Use {@link #isNull(Property)} instead. */
     public QueryBuilder<T> greater(Property property, Date value) {
+        verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value.getTime()));
         return this;
     }
 
     public QueryBuilder<T> between(Property property, long value1, long value2) {
+        verifyHandle();
         checkCombineCondition(nativeBetween(handle, property.getId(), value1, value2));
         return this;
     }
 
     /** @throws NullPointerException if one of the given values is null. */
     public QueryBuilder<T> between(Property property, Date value1, Date value2) {
+        verifyHandle();
         checkCombineCondition(nativeBetween(handle, property.getId(), value1.getTime(), value2.getTime()));
         return this;
     }
 
     // FIXME DbException: invalid unordered_map<K, T> key
     public QueryBuilder<T> in(Property property, long[] values) {
+        verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, false));
         return this;
     }
 
     public QueryBuilder<T> in(Property property, int[] values) {
+        verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, false));
         return this;
     }
 
     public QueryBuilder<T> notIn(Property property, long[] values) {
+        verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, true));
         return this;
     }
 
     public QueryBuilder<T> notIn(Property property, int[] values) {
+        verifyHandle();
         checkCombineCondition(nativeIn(handle, property.getId(), values, true));
         return this;
     }
 
     public QueryBuilder<T> equal(Property property, String value) {
+        verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value, false));
         return this;
     }
 
+    // Help people with floating point equality...
+
+    /**
+     * Floating point equality is non-trivial; this is just a convenience for
+     * {@link #between(Property, double, double)} with parameters(property, value - tolerance, value + tolerance).
+     * When using {@link Query#setParameters(Property, double, double)},
+     * consider that the params are the lower and upper bounds.
+     */
+    public QueryBuilder<T> equal(Property property, double value, double tolerance) {
+        return between(property, value - tolerance, value + tolerance);
+    }
+
     public QueryBuilder<T> notEqual(Property property, String value) {
+        verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value, false));
         return this;
     }
 
     public QueryBuilder<T> contains(Property property, String value) {
+        verifyHandle();
         checkCombineCondition(nativeContains(handle, property.getId(), value, false));
         return this;
     }
 
     public QueryBuilder<T> startsWith(Property property, String value) {
+        verifyHandle();
         checkCombineCondition(nativeStartsWith(handle, property.getId(), value, false));
         return this;
     }
 
     public QueryBuilder<T> endsWith(Property property, String value) {
+        verifyHandle();
         checkCombineCondition(nativeEndsWith(handle, property.getId(), value, false));
         return this;
     }
 
     public QueryBuilder<T> equal(Property property, String value, StringOrder order) {
+        verifyHandle();
         checkCombineCondition(nativeEqual(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
     public QueryBuilder<T> notEqual(Property property, String value, StringOrder order) {
+        verifyHandle();
         checkCombineCondition(nativeNotEqual(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
     public QueryBuilder<T> contains(Property property, String value, StringOrder order) {
+        verifyHandle();
         checkCombineCondition(nativeContains(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
     public QueryBuilder<T> startsWith(Property property, String value, StringOrder order) {
+        verifyHandle();
         checkCombineCondition(nativeStartsWith(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
     public QueryBuilder<T> endsWith(Property property, String value, StringOrder order) {
+        verifyHandle();
         checkCombineCondition(nativeEndsWith(handle, property.getId(), value, order == StringOrder.CASE_SENSITIVE));
         return this;
     }
 
     public QueryBuilder<T> less(Property property, double value) {
+        verifyHandle();
         checkCombineCondition(nativeLess(handle, property.getId(), value));
         return this;
     }
 
     public QueryBuilder<T> greater(Property property, double value) {
+        verifyHandle();
         checkCombineCondition(nativeGreater(handle, property.getId(), value));
         return this;
     }
 
     public QueryBuilder<T> between(Property property, double value1, double value2) {
+        verifyHandle();
         checkCombineCondition(nativeBetween(handle, property.getId(), value1, value2));
         return this;
     }

@@ -36,9 +36,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 import io.objectbox.annotation.apihint.Beta;
+import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.converter.PropertyConverter;
 import io.objectbox.exception.DbException;
@@ -129,8 +131,14 @@ public class BoxStore implements Closeable {
 
     static native int nativeCleanStaleReadTransactions(long store);
 
+    static native String nativeStartObjectBrowser(long store, String urlPath, int port);
+
+    static native void nativeSetDebugFlags(long store, int debugFlags);
+
+    public static native boolean isObjectBrowserAvailable();
+
     public static String getVersion() {
-        return "1.0.1-2017-09-10";
+        return "1.3.3-2017-12-03";
     }
 
     private final File directory;
@@ -145,7 +153,8 @@ public class BoxStore implements Closeable {
     private final Set<Transaction> transactions = Collections.newSetFromMap(new WeakHashMap<Transaction, Boolean>());
     private final ExecutorService threadPool = new ObjectBoxThreadPool(this);
     private final ObjectClassPublisher objectClassPublisher;
-    final boolean debugTx;
+    final boolean debugTxRead;
+    final boolean debugTxWrite;
     final boolean debugRelations;
 
     /** Set when running inside TX */
@@ -157,6 +166,12 @@ public class BoxStore implements Closeable {
 
     // Not atomic because it is read most of the time
     volatile int commitCount;
+
+    private int objectBrowserPort;
+
+    private final int queryAttempts;
+
+    private final TxCallback failedReadTxAttemptCallback;
 
     BoxStore(BoxStoreBuilder builder) {
         NativeLibraryLoader.ensureLoaded();
@@ -176,8 +191,15 @@ public class BoxStore implements Closeable {
         }
         verifyNotAlreadyOpen(canonicalPath);
 
-        handle = nativeCreate(directory.getAbsolutePath(), builder.maxSizeInKByte, builder.maxReaders, builder.model);
-        debugTx = builder.debugTransactions;
+        handle = nativeCreate(canonicalPath, builder.maxSizeInKByte, builder.maxReaders, builder.model);
+        int debugFlags = builder.debugFlags;
+        if (debugFlags != 0) {
+            nativeSetDebugFlags(handle, debugFlags);
+            debugTxRead = (debugFlags & DebugFlags.LOG_TRANSACTIONS_READ) != 0;
+            debugTxWrite = (debugFlags & DebugFlags.LOG_TRANSACTIONS_WRITE) != 0;
+        } else {
+            debugTxRead = debugTxWrite = false;
+        }
         debugRelations = builder.debugRelations;
 
         for (EntityInfo entityInfo : builder.entityInfoList) {
@@ -208,6 +230,9 @@ public class BoxStore implements Closeable {
         }
 
         objectClassPublisher = new ObjectClassPublisher(this);
+
+        failedReadTxAttemptCallback = builder.failedReadTxAttemptCallback;
+        queryAttempts = builder.queryAttempts < 1 ? 1 : builder.queryAttempts;
     }
 
     private static void verifyNotAlreadyOpen(String canonicalPath) {
@@ -292,7 +317,7 @@ public class BoxStore implements Closeable {
         checkOpen();
         // Because write TXs are typically not cached, initialCommitCount is not as relevant than for read TXs.
         int initialCommitCount = commitCount;
-        if (debugTx) {
+        if (debugTxWrite) {
             System.out.println("Begin TX with commit count " + initialCommitCount);
         }
         long nativeTx = nativeBeginTx(handle);
@@ -316,7 +341,7 @@ public class BoxStore implements Closeable {
         // updated resulting in querying obsolete data until another commit is done.
         // TODO add multithreaded test for this
         int initialCommitCount = commitCount;
-        if (debugTx) {
+        if (debugTxRead) {
             System.out.println("Begin read TX with commit count " + initialCommitCount);
         }
         long nativeTx = nativeBeginReadTx(handle);
@@ -331,6 +356,15 @@ public class BoxStore implements Closeable {
         return closed;
     }
 
+    /**
+     * Closes the BoxStore and frees associated resources.
+     * This method is useful for unit tests;
+     * most real applications should open a BoxStore once and keep it open until the app dies.
+     * <p>
+     * WARNING:
+     * This is a somewhat delicate thing to do if you have threads running that may potentially still use the BoxStore.
+     * This results in undefined behavior, including the possibility of crashing.
+     */
     public void close() {
         boolean oldClosedState;
         synchronized (this) {
@@ -377,6 +411,15 @@ public class BoxStore implements Closeable {
         }
     }
 
+    /**
+     * Danger zone! This will delete all data (files) of this BoxStore!
+     * You must call {@link #close()} before and read the docs of that method carefully!
+     * <p>
+     * A safer alternative: use the static {@link #deleteAllFiles(File)} method before opening the BoxStore.
+     *
+     * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
+     * Note: If false is returned, any number of files may have been deleted before the failure happened.
+     */
     public boolean deleteAllFiles() {
         if (!closed) {
             throw new IllegalStateException("Store must be closed");
@@ -384,20 +427,70 @@ public class BoxStore implements Closeable {
         return deleteAllFiles(directory);
     }
 
+    /**
+     * Danger zone! This will delete all files in the given directory!
+     * <p>
+     * If you did not use a custom name with BoxStoreBuilder, you can pass "new File({@link
+     * BoxStoreBuilder#DEFAULT_NAME})".
+     *
+     * @param objectStoreDirectory directory to be deleted; this is the value you previously provided to {@link
+     *                             BoxStoreBuilder#directory(File)}
+     * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
+     * Note: If false is returned, any number of files may have been deleted before the failure happened.
+     */
     public static boolean deleteAllFiles(File objectStoreDirectory) {
-        boolean ok = true;
-        if (objectStoreDirectory != null && objectStoreDirectory.exists()) {
-            File[] files = objectStoreDirectory.listFiles();
-            if (files != null) {
-                for (File file : files) {
-                    ok &= file.delete();
-                }
-            } else {
-                ok = false;
-            }
-            ok &= objectStoreDirectory.delete();
+        if (!objectStoreDirectory.exists()) {
+            return true;
         }
-        return ok;
+
+        File[] files = objectStoreDirectory.listFiles();
+        if (files == null) {
+            return false;
+        }
+        for (File file : files) {
+            if (!file.delete()) {
+                // OK if concurrently deleted. Fail fast otherwise.
+                if (file.exists()) {
+                    return false;
+                }
+            }
+        }
+        return objectStoreDirectory.delete();
+    }
+
+    /**
+     * Danger zone! This will delete all files in the given directory!
+     * <p>
+     * If you did not use a custom name with BoxStoreBuilder, you can pass "new File({@link
+     * BoxStoreBuilder#DEFAULT_NAME})".
+     *
+     * @param androidContext     provide an Android Context like Application or Service
+     * @param customDbNameOrNull use null for default name, or the name you previously provided to {@link
+     *                           BoxStoreBuilder#name(String)}.
+     * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
+     * Note: If false is returned, any number of files may have been deleted before the failure happened.
+     */
+    public static boolean deleteAllFiles(Object androidContext, @Nullable String customDbNameOrNull) {
+        File dbDir = BoxStoreBuilder.getAndroidDbDir(androidContext, customDbNameOrNull);
+        return deleteAllFiles(dbDir);
+    }
+
+    /**
+     * Danger zone! This will delete all files in the given directory!
+     * <p>
+     * If you did not use a custom name with BoxStoreBuilder, you can pass "new File({@link
+     * BoxStoreBuilder#DEFAULT_NAME})".
+     *
+     * @param baseDirectoryOrNull use null for no base dir, or the value you previously provided to {@link
+     *                            BoxStoreBuilder#baseDirectory(File)}
+     * @param customDbNameOrNull  use null for default name, or the name you previously provided to {@link
+     *                            BoxStoreBuilder#name(String)}.
+     * @return true if the directory 1) was deleted successfully OR 2) did not exist in the first place.
+     * Note: If false is returned, any number of files may have been deleted before the failure happened.
+     */
+    public static boolean deleteAllFiles(@Nullable File baseDirectoryOrNull, @Nullable String customDbNameOrNull) {
+        File dbDir = BoxStoreBuilder.getDbDir(baseDirectoryOrNull, customDbNameOrNull);
+        return deleteAllFiles(dbDir);
     }
 
     @Internal
@@ -416,8 +509,9 @@ public class BoxStore implements Closeable {
         // Only one write TX at a time, but there is a chance two writers race after commit: thus synchronize
         synchronized (txCommitCountLock) {
             commitCount++; // Overflow is OK because we check for equality
-            if (debugTx) {
-                System.out.println("TX committed. New commit count: " + commitCount);
+            if (debugTxWrite) {
+                System.out.println("TX committed. New commit count: " + commitCount + ", entity types affected: " +
+                        (entityTypeIdsAffected != null ? entityTypeIdsAffected.length : 0));
             }
         }
 
@@ -510,11 +604,59 @@ public class BoxStore implements Closeable {
     }
 
     /**
+     * Calls {@link #callInReadTx(Callable)} and retries in case a DbException is thrown.
+     * If the given amount of attempts is reached, the last DbException will be thrown.
+     * Experimental: API might change.
+     */
+    @Experimental
+    public <T> T callInReadTxWithRetry(Callable<T> callable, int attempts, int initialBackOffInMs, boolean logAndHeal) {
+        if (attempts == 1) {
+            return callInReadTx(callable);
+        } else if (attempts < 1) {
+            throw new IllegalArgumentException("Illegal value of attempts: " + attempts);
+        }
+        long backoffInMs = initialBackOffInMs;
+        DbException lastException = null;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                return callInReadTx(callable);
+            } catch (DbException e) {
+                lastException = e;
+
+                String diagnose = diagnose();
+                String message = attempt + " of " + attempts + " attempts of calling a read TX failed:";
+                if (logAndHeal) {
+                    System.err.println(message);
+                    e.printStackTrace();
+                    System.err.println(diagnose);
+                    System.err.flush();
+
+                    System.gc();
+                    System.runFinalization();
+                    cleanStaleReadTransactions();
+                }
+                if (failedReadTxAttemptCallback != null) {
+                    failedReadTxAttemptCallback.txFinished(null, new DbException(message + " \n" + diagnose, e));
+                }
+                try {
+                    Thread.sleep(backoffInMs);
+                } catch (InterruptedException ie) {
+                    ie.printStackTrace();
+                    throw lastException;
+                }
+                backoffInMs *= 2;
+            }
+        }
+        throw lastException;
+    }
+
+    /**
      * Calls the given callable inside a read(-only) transaction. Multiple read transactions can occur at the same time.
      * This allows multiple read operations (gets) using a single consistent state of data.
      * Also, for a high number of read operations (thousands, e.g. in loops),
      * it is advised to run them in a single read transaction for efficiency reasons.
-     * Note that any exception thrown by the given Callable will be wrapped in a RuntimeException.
+     * Note that an exception thrown by the given Callable will be wrapped in a RuntimeException, if the exception is
+     * not a RuntimeException itself.
      */
     public <T> T callInReadTx(Callable<T> callable) {
         Transaction tx = this.activeTx.get();
@@ -524,6 +666,8 @@ public class BoxStore implements Closeable {
             activeTx.set(tx);
             try {
                 return callable.call();
+            } catch (RuntimeException e) {
+                throw e;
             } catch (Exception e) {
                 throw new RuntimeException("Callable threw exception", e);
             } finally {
@@ -619,6 +763,11 @@ public class BoxStore implements Closeable {
         });
     }
 
+    /**
+     * Gives info that can be useful for debugging.
+     *
+     * @return String that is typically logged by the application.
+     */
     public String diagnose() {
         return nativeDiagnose(handle);
     }
@@ -660,6 +809,48 @@ public class BoxStore implements Closeable {
         return new SubscriptionBuilder<>(objectClassPublisher, null, threadPool);
     }
 
+    @Experimental
+    @Nullable
+    public String startObjectBrowser() {
+        verifyObjectBrowserNotRunning();
+        final int basePort = 8090;
+        for (int port = basePort; port < basePort + 10; port++) {
+            try {
+                String url = startObjectBrowser(port);
+                if (url != null) {
+                    return url;
+                }
+            } catch (DbException e) {
+                if (e.getMessage() == null || !e.getMessage().contains("port")) {
+                    throw e;
+                }
+            }
+        }
+        return null;
+    }
+
+    @Experimental
+    @Nullable
+    public String startObjectBrowser(int port) {
+        verifyObjectBrowserNotRunning();
+        String url = nativeStartObjectBrowser(handle, null, port);
+        if (url != null) {
+            objectBrowserPort = port;
+        }
+        return url;
+    }
+
+    @Experimental
+    public int getObjectBrowserPort() {
+        return objectBrowserPort;
+    }
+
+    private void verifyObjectBrowserNotRunning() {
+        if (objectBrowserPort != 0) {
+            throw new DbException("ObjectBrowser is already running at port " + objectBrowserPort);
+        }
+    }
+
     /**
      * Like {@link #subscribe()}, but wires the supplied @{@link io.objectbox.reactive.DataObserver} only to the given
      * object class for notifications.
@@ -681,5 +872,19 @@ public class BoxStore implements Closeable {
     @Internal
     public boolean isDebugRelations() {
         return debugRelations;
+    }
+
+    @Internal
+    public int internalQueryAttempts() {
+        return queryAttempts;
+    }
+
+    @Internal
+    public TxCallback internalFailedReadTxAttemptCallback() {
+        return failedReadTxAttemptCallback;
+    }
+
+    void setDebugFlags(int debugFlags) {
+        nativeSetDebugFlags(handle, debugFlags);
     }
 }

@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
@@ -52,7 +53,6 @@ public class Box<T> {
     private final ThreadLocal<Cursor<T>> threadLocalReader = new ThreadLocal<>();
 
     private final IdGetter<T> idGetter;
-    private final boolean debugTx;
 
     private EntityInfo entityInfo;
     private volatile Field boxStoreField;
@@ -61,7 +61,6 @@ public class Box<T> {
         this.store = store;
         this.entityClass = entityClass;
         idGetter = store.getEntityInfo(entityClass).getIdGetter();
-        debugTx = store.debugTx;
     }
 
     Cursor<T> getReader() {
@@ -76,10 +75,7 @@ public class Box<T> {
                     throw new IllegalStateException("Illegal reader TX state");
                 }
                 tx.renew();
-                cursor.renew(tx);
-                if (debugTx) {
-                    System.out.println("Renewed: " + cursor + ", TX: " + tx);
-                }
+                cursor.renew();
             } else {
                 cursor = store.beginReadTx().createCursor(entityClass);
                 threadLocalReader.set(cursor);
@@ -174,6 +170,9 @@ public class Box<T> {
         }
     }
 
+    /**
+     * Called by {@link BoxStore#callInReadTx(Callable)} - does not throw so caller does not need try/finally.
+     */
     void readTxFinished(Transaction tx) {
         Cursor<T> cursor = activeTxCursor.get();
         if (cursor != null && cursor.getTx() == tx) {
@@ -285,50 +284,10 @@ public class Box<T> {
     }
 
     @Temporary
-    public List<T> find(String propertyName, String value) {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.find(propertyName, value);
-        } finally {
-            releaseReader(reader);
-        }
-    }
-
-    @Temporary
-    public List<T> find(String propertyName, long value) {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.find(propertyName, value);
-        } finally {
-            releaseReader(reader);
-        }
-    }
-
-    @Temporary
-    public List<T> find(int propertyId, long value) {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.find(propertyId, value);
-        } finally {
-            releaseReader(reader);
-        }
-    }
-
-    @Temporary
-    public List<T> find(int propertyId, String value) {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.find(propertyId, value);
-        } finally {
-            releaseReader(reader);
-        }
-    }
-
-    @Temporary
     public List<T> find(Property property, String value) {
         Cursor<T> reader = getReader();
         try {
-            return reader.find(property.dbName, value);
+            return reader.find(property, value);
         } finally {
             releaseReader(reader);
         }
@@ -338,7 +297,7 @@ public class Box<T> {
     public List<T> find(Property property, long value) {
         Cursor<T> reader = getReader();
         try {
-            return reader.find(property.dbName, value);
+            return reader.find(property, value);
         } finally {
             releaseReader(reader);
         }

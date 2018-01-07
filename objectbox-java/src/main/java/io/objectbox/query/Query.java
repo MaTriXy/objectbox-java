@@ -1,5 +1,7 @@
 package io.objectbox.query;
 
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.Iterator;
 import java.util.List;
@@ -15,6 +17,7 @@ import io.objectbox.Property;
 import io.objectbox.annotation.apihint.Beta;
 import io.objectbox.internal.CallWithHandle;
 import io.objectbox.reactive.DataObserver;
+import io.objectbox.reactive.DataSubscriptionList;
 import io.objectbox.reactive.SubscriptionBuilder;
 import io.objectbox.relation.RelationInfo;
 import io.objectbox.relation.ToOne;
@@ -29,45 +32,45 @@ import io.objectbox.relation.ToOne;
 @Beta
 public class Query<T> {
 
-    static native void nativeDestroy(long handle);
+    native void nativeDestroy(long handle);
 
-    native static Object nativeFindFirst(long handle, long cursorHandle);
+    native Object nativeFindFirst(long handle, long cursorHandle);
 
-    native static Object nativeFindUnique(long handle, long cursorHandle);
+    native Object nativeFindUnique(long handle, long cursorHandle);
 
-    native static List nativeFind(long handle, long cursorHandle, long offset, long limit);
+    native List nativeFind(long handle, long cursorHandle, long offset, long limit);
 
-    native static long[] nativeFindKeysUnordered(long handle, long cursorHandle);
+    native long[] nativeFindKeysUnordered(long handle, long cursorHandle);
 
-    native static long nativeCount(long handle, long cursorHandle);
+    native long nativeCount(long handle, long cursorHandle);
 
-    native static long nativeSum(long handle, long cursorHandle, int propertyId);
+    native long nativeSum(long handle, long cursorHandle, int propertyId);
 
-    native static double nativeSumDouble(long handle, long cursorHandle, int propertyId);
+    native double nativeSumDouble(long handle, long cursorHandle, int propertyId);
 
-    native static long nativeMax(long handle, long cursorHandle, int propertyId);
+    native long nativeMax(long handle, long cursorHandle, int propertyId);
 
-    native static double nativeMaxDouble(long handle, long cursorHandle, int propertyId);
+    native double nativeMaxDouble(long handle, long cursorHandle, int propertyId);
 
-    native static long nativeMin(long handle, long cursorHandle, int propertyId);
+    native long nativeMin(long handle, long cursorHandle, int propertyId);
 
-    native static double nativeMinDouble(long handle, long cursorHandle, int propertyId);
+    native double nativeMinDouble(long handle, long cursorHandle, int propertyId);
 
-    native static double nativeAvg(long handle, long cursorHandle, int propertyId);
+    native double nativeAvg(long handle, long cursorHandle, int propertyId);
 
-    native static long nativeRemove(long handle, long cursorHandle);
+    native long nativeRemove(long handle, long cursorHandle);
 
-    native static void nativeSetParameter(long handle, int propertyId, String parameterAlias, String value);
+    native void nativeSetParameter(long handle, int propertyId, String parameterAlias, String value);
 
-    native static void nativeSetParameter(long handle, int propertyId, String parameterAlias, long value);
+    native void nativeSetParameter(long handle, int propertyId, String parameterAlias, long value);
 
-    native static void nativeSetParameters(long handle, int propertyId, String parameterAlias, long value1,
-                                           long value2);
+    native void nativeSetParameters(long handle, int propertyId, String parameterAlias, long value1,
+                                    long value2);
 
-    native static void nativeSetParameter(long handle, int propertyId, String parameterAlias, double value);
+    native void nativeSetParameter(long handle, int propertyId, String parameterAlias, double value);
 
-    native static void nativeSetParameters(long handle, int propertyId, String parameterAlias, double value1,
-                                           double value2);
+    native void nativeSetParameters(long handle, int propertyId, String parameterAlias, double value1,
+                                    double value2);
 
     private final Box<T> box;
     private final BoxStore store;
@@ -75,16 +78,23 @@ public class Query<T> {
     private final QueryPublisher<T> publisher;
     private final List<EagerRelation> eagerRelations;
     private final QueryFilter<T> filter;
+    private final Comparator<T> comparator;
+    private final int queryAttempts;
+    private final int initialRetryBackOffInMs = 10;
+
     long handle;
 
-    Query(Box<T> box, long queryHandle, boolean hasOrder, List<EagerRelation> eagerRelations, QueryFilter<T> filter) {
+    Query(Box<T> box, long queryHandle, boolean hasOrder, List<EagerRelation> eagerRelations, QueryFilter<T> filter,
+          Comparator<T> comparator) {
         this.box = box;
         store = box.getStore();
+        queryAttempts = store.internalQueryAttempts();
         handle = queryHandle;
         this.hasOrder = hasOrder;
         publisher = new QueryPublisher<>(this, box);
         this.eagerRelations = eagerRelations;
         this.filter = filter;
+        this.comparator = comparator;
     }
 
     @Override
@@ -108,8 +118,8 @@ public class Query<T> {
      */
     @Nullable
     public T findFirst() {
-        ensureNoFilter();
-        return store.callInReadTx(new Callable<T>() {
+        ensureNoFilterNoComparator();
+        return store.callInReadTxWithRetry(new Callable<T>() {
             @Override
             public T call() {
                 @SuppressWarnings("unchecked")
@@ -117,13 +127,21 @@ public class Query<T> {
                 resolveEagerRelation(entity);
                 return entity;
             }
-        });
+        }, queryAttempts, initialRetryBackOffInMs, true);
     }
 
-    private void ensureNoFilter() {
+    private void ensureNoFilterNoComparator() {
         if (filter != null) {
             throw new UnsupportedOperationException("Does not yet work with a filter yet. " +
                     "At this point, only find() and forEach() are supported with filters.");
+        }
+        ensureNoComparator();
+    }
+
+    private void ensureNoComparator() {
+        if (comparator != null) {
+            throw new UnsupportedOperationException("Does not yet work with a sorting comparator yet. " +
+                    "At this point, only find() is supported with sorting comparators.");
         }
     }
 
@@ -134,8 +152,8 @@ public class Query<T> {
      */
     @Nullable
     public T findUnique() {
-        ensureNoFilter();
-        return store.callInReadTx(new Callable<T>() {
+        ensureNoFilterNoComparator();
+        return store.callInReadTxWithRetry(new Callable<T>() {
             @Override
             public T call() {
                 @SuppressWarnings("unchecked")
@@ -143,7 +161,7 @@ public class Query<T> {
                 resolveEagerRelation(entity);
                 return entity;
             }
-        });
+        }, queryAttempts, initialRetryBackOffInMs, true);
     }
 
     /**
@@ -151,7 +169,7 @@ public class Query<T> {
      */
     @Nonnull
     public List<T> find() {
-        return store.callInReadTx(new Callable<List<T>>() {
+        return store.callInReadTxWithRetry(new Callable<List<T>>() {
             @Override
             public List<T> call() throws Exception {
                 long cursorHandle = InternalAccess.getActiveTxCursorHandle(box);
@@ -166,9 +184,12 @@ public class Query<T> {
                     }
                 }
                 resolveEagerRelations(entities);
+                if (comparator != null) {
+                    Collections.sort(entities, comparator);
+                }
                 return entities;
             }
-        });
+        }, queryAttempts, initialRetryBackOffInMs, true);
     }
 
     /**
@@ -176,8 +197,8 @@ public class Query<T> {
      */
     @Nonnull
     public List<T> find(final long offset, final long limit) {
-        ensureNoFilter();
-        return store.callInReadTx(new Callable<List<T>>() {
+        ensureNoFilterNoComparator();
+        return store.callInReadTxWithRetry(new Callable<List<T>>() {
             @Override
             public List<T> call() {
                 long cursorHandle = InternalAccess.getActiveTxCursorHandle(box);
@@ -185,13 +206,13 @@ public class Query<T> {
                 resolveEagerRelations(entities);
                 return entities;
             }
-        });
+        }, queryAttempts, initialRetryBackOffInMs, true);
     }
 
     /**
      * Very efficient way to get just the IDs without creating any objects. IDs can later be used to lookup objects
      * (lookups by ID are also very efficient in ObjectBox).
-     *
+     * <p>
      * Note: a filter set with {@link QueryBuilder#filter} will be silently ignored!
      */
     @Nonnull
@@ -211,7 +232,7 @@ public class Query<T> {
      * Find all Objects matching the query without actually loading the Objects. See @{@link LazyList} for details.
      */
     public LazyList<T> findLazy() {
-        ensureNoFilter();
+        ensureNoFilterNoComparator();
         return new LazyList<>(box, findIds(), false);
     }
 
@@ -225,6 +246,7 @@ public class Query<T> {
      * Note: because the consumer is called within a read transaction it may not write to the database.
      */
     public void forEach(final QueryConsumer<T> consumer) {
+        ensureNoComparator();
         box.getStore().runInReadTx(new Runnable() {
             @Override
             public void run() {
@@ -258,7 +280,7 @@ public class Query<T> {
      */
     @Nonnull
     public LazyList<T> findLazyCached() {
-        ensureNoFilter();
+        ensureNoFilterNoComparator();
         return new LazyList<>(box, findIds(), true);
     }
 
@@ -273,7 +295,7 @@ public class Query<T> {
     }
 
     /** Note: no null check on eagerRelations! */
-    void resolveEagerRelationForNonNullEagerRelations(Object entity, int entityIndex) {
+    void resolveEagerRelationForNonNullEagerRelations(@Nonnull Object entity, int entityIndex) {
         for (EagerRelation eagerRelation : eagerRelations) {
             if (eagerRelation.limit == 0 || entityIndex < eagerRelation.limit) {
                 resolveEagerRelation(entity, eagerRelation);
@@ -281,15 +303,15 @@ public class Query<T> {
         }
     }
 
-    void resolveEagerRelation(Object entity) {
-        if (eagerRelations != null) {
+    void resolveEagerRelation(@Nullable Object entity) {
+        if (eagerRelations != null && entity != null) {
             for (EagerRelation eagerRelation : eagerRelations) {
                 resolveEagerRelation(entity, eagerRelation);
             }
         }
     }
 
-    void resolveEagerRelation(Object entity, EagerRelation eagerRelation) {
+    void resolveEagerRelation(@Nonnull Object entity, EagerRelation eagerRelation) {
         if (eagerRelations != null) {
             RelationInfo relationInfo = eagerRelation.relationInfo;
             if (relationInfo.toOneGetter != null) {
@@ -480,6 +502,18 @@ public class Query<T> {
      */
     public SubscriptionBuilder<List<T>> subscribe() {
         return new SubscriptionBuilder<>(publisher, null, box.getStore().internalThreadPool());
+    }
+
+    /**
+     * Convenience for {@link #subscribe()} with a subsequent call to
+     * {@link SubscriptionBuilder#dataSubscriptionList(DataSubscriptionList)}.
+     *
+     * @param dataSubscriptionList the resulting {@link io.objectbox.reactive.DataSubscription} will be added to it
+     */
+    public SubscriptionBuilder<List<T>> subscribe(DataSubscriptionList dataSubscriptionList) {
+        SubscriptionBuilder<List<T>> subscriptionBuilder = subscribe();
+        subscriptionBuilder.dataSubscriptionList(dataSubscriptionList);
+        return subscriptionBuilder;
     }
 
     /**

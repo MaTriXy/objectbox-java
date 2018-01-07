@@ -24,11 +24,9 @@ import java.util.Collections;
 import java.util.List;
 
 import io.objectbox.TestUtils;
+import io.objectbox.query.QueryFilter;
 
-
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
 
 public class ToManyTest extends AbstractRelationTest {
 
@@ -190,6 +188,20 @@ public class ToManyTest extends AbstractRelationTest {
     }
 
     @Test
+    public void testRemoveById() {
+        int count = 5;
+        Customer customer = putCustomerWithOrders(count);
+        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        Order removed1 = toMany.removeById(toMany.get(3).getId());
+        assertEquals("order4", removed1.getText());
+        Order removed2 = toMany.removeById(toMany.get(1).getId());
+        assertEquals("order2", removed2.getText());
+        assertNull(toMany.removeById(42));
+        customerBox.put(customer);
+        assertOrder2And4Removed(count, customer, toMany);
+    }
+
+    @Test
     public void testRetainAll() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
@@ -315,6 +327,57 @@ public class ToManyTest extends AbstractRelationTest {
         assertEquals("new2", toMany.get(4).getText());
     }
 
+    @Test
+    public void testHasA() {
+        Customer customer = putCustomerWithOrders(3);
+        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        QueryFilter<Order> filter = new QueryFilter<Order>() {
+            @Override
+            public boolean keep(Order entity) {
+                return "order2".equals(entity.text);
+            }
+        };
+        assertTrue(toMany.hasA(filter));
+        toMany.remove(1);
+        assertFalse(toMany.hasA(filter));
+    }
+
+    @Test
+    public void testHasAll() {
+        Customer customer = putCustomerWithOrders(3);
+        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        QueryFilter<Order> filter = new QueryFilter<Order>() {
+            @Override
+            public boolean keep(Order entity) {
+                return entity.text.startsWith("order");
+            }
+        };
+        assertTrue(toMany.hasAll(filter));
+        toMany.get(0).text = "nope";
+        assertFalse(toMany.hasAll(filter));
+        toMany.clear();
+        assertFalse(toMany.hasAll(filter));
+    }
+
+    @Test
+    public void testIndexOfId() {
+        Customer customer = putCustomerWithOrders(3);
+        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        assertEquals(1, toMany.indexOfId(toMany.get(1).getId()));
+        assertEquals(2, toMany.indexOfId(toMany.get(2).getId()));
+        assertEquals(0, toMany.indexOfId(toMany.get(0).getId()));
+        assertEquals(-1, toMany.indexOfId(42));
+    }
+
+    @Test
+    public void testGetById() {
+        Customer customer = putCustomerWithOrders(3);
+        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        assertEquals(toMany.get(1), toMany.getById(toMany.get(1).getId()));
+        assertEquals(toMany.get(2), toMany.getById(toMany.get(2).getId()));
+        assertEquals(toMany.get(0), toMany.getById(toMany.get(0).getId()));
+        assertNull(toMany.getById(42));
+    }
 
     @Test
     public void testSerializable() throws IOException, ClassNotFoundException {

@@ -29,7 +29,12 @@ import io.objectbox.annotation.apihint.Temporary;
 @Internal
 @NotThreadSafe
 public abstract class Cursor<T> implements Closeable {
-    static final boolean WARN_FINALIZER = false;
+    /** May be set by tests */
+    @Internal
+    static boolean TRACK_CREATION_STACK;
+
+    @Internal
+    static boolean LOG_READ_NOT_CLOSED;
 
     protected static final int PUT_FLAG_FIRST = 1;
     protected static final int PUT_FLAG_COMPLETE = 1 << 1;
@@ -52,10 +57,6 @@ public abstract class Cursor<T> implements Closeable {
 
     static native long nativeCount(long cursor);
 
-    static native List nativeFindScalar(long cursor, String propertyName, long value);
-
-    static native List nativeFindString(long cursor, String propertyName, String value);
-
     static native List nativeFindScalarPropertyId(long cursor, int propertyId, long value);
 
     static native List nativeFindStringPropertyId(long cursor, int propertyId, String value);
@@ -65,7 +66,7 @@ public abstract class Cursor<T> implements Closeable {
 
     static native long nativeLookupKeyUsingIndex(long cursor, int propertyId, String value);
 
-    static native long nativeRenew(long cursor, long tx);
+    static native long nativeRenew(long cursor);
 
     protected static native long collect313311(long cursor, long keyIfComplete, int flags,
                                                int idStr1, String valueStr1, int idStr2, String valueStr2,
@@ -115,11 +116,12 @@ public abstract class Cursor<T> implements Closeable {
 
     static native void nativeSetBoxStoreForEntities(long cursor, Object boxStore);
 
-    protected Transaction tx;
+    protected final Transaction tx;
     protected final long cursor;
     protected final EntityInfo entityInfo;
     protected final BoxStore boxStoreForEntities;
 
+    protected final boolean readOnly;
     protected boolean closed;
 
     private final Throwable creationThrowable;
@@ -129,6 +131,7 @@ public abstract class Cursor<T> implements Closeable {
             throw new IllegalArgumentException("Transaction is null");
         }
         this.tx = tx;
+        readOnly = tx.isReadOnly();
         this.cursor = cursor;
         this.entityInfo = entityInfo;
         this.boxStoreForEntities = boxStore;
@@ -140,19 +143,26 @@ public abstract class Cursor<T> implements Closeable {
                 property.verifyId(id);
             }
         }
-        creationThrowable = WARN_FINALIZER ? new Throwable() : null;
+        creationThrowable = TRACK_CREATION_STACK ? new Throwable() : null;
 
         nativeSetBoxStoreForEntities(cursor, boxStore);
     }
 
     @Override
     protected void finalize() throws Throwable {
-        if (WARN_FINALIZER && !closed && creationThrowable != null) {
-            System.err.println("Cursor was not closed. It was initially created here:");
-            creationThrowable.printStackTrace();
+        if (!closed) {
+            // By default only complain about write cursors
+            if (!readOnly || LOG_READ_NOT_CLOSED) {
+                System.err.println("Cursor was not closed.");
+                if (creationThrowable != null) {
+                    System.err.println("Cursor was initially created here:");
+                    creationThrowable.printStackTrace();
+                }
+                System.err.flush();
+            }
+            close();
+            super.finalize();
         }
-        close();
-        super.finalize();
     }
 
     protected abstract long getId(T entity);
@@ -217,29 +227,20 @@ public abstract class Cursor<T> implements Closeable {
     }
 
     @Temporary
-    public List<T> find(String propertyName, long value) {
-        return nativeFindScalar(cursor, propertyName, value);
+    public List<T> find(Property property, long value) {
+        return nativeFindScalarPropertyId(cursor, property.id, value);
     }
 
     @Temporary
-    public List<T> find(String propertyName, String value) {
-        return nativeFindString(cursor, propertyName, value);
-    }
-
-    @Temporary
-    public List<T> find(int propertyId, long value) {
-        return nativeFindScalarPropertyId(cursor, propertyId, value);
-    }
-
-    @Temporary
-    public List<T> find(int propertyId, String value) {
-        return nativeFindStringPropertyId(cursor, propertyId, value);
+    public List<T> find(Property property, String value) {
+        return nativeFindStringPropertyId(cursor, property.id, value);
     }
 
     /**
      * @return key or 0 if not found
+     * @deprecated TODO only used in tests, remove in the future
      */
-    public long lookupKeyUsingIndex(int propertyId, String value) {
+    long lookupKeyUsingIndex(int propertyId, String value) {
         return nativeLookupKeyUsingIndex(cursor, propertyId, value);
     }
 
@@ -263,9 +264,11 @@ public abstract class Cursor<T> implements Closeable {
         return tx.createCursor(targetClass);
     }
 
-    public void renew(Transaction tx) {
-        nativeRenew(cursor, tx.internalHandle());
-        this.tx = tx;
+    /**
+     * To be used in combination with {@link Transaction#renew()}.
+     * */
+    public void renew() {
+        nativeRenew(cursor);
     }
 
     @Internal

@@ -20,13 +20,16 @@ import java.io.Closeable;
 
 import javax.annotation.concurrent.NotThreadSafe;
 
+import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.internal.CursorFactory;
 
 @Internal
 @NotThreadSafe
 public class Transaction implements Closeable {
-    static final boolean WARN_FINALIZER = false;
+    /** May be set by tests */
+    @Internal
+    static boolean TRACK_CREATION_STACK;
 
     private final long transaction;
     private final BoxStore store;
@@ -34,7 +37,9 @@ public class Transaction implements Closeable {
     private final Throwable creationThrowable;
 
     private int initialCommitCount;
-    private boolean closed;
+
+    /** volatile because finalizer thread may interfere with "one thread, one TX" rule */
+    private volatile boolean closed;
 
     static native void nativeDestroy(long transaction);
 
@@ -66,14 +71,19 @@ public class Transaction implements Closeable {
         this.initialCommitCount = initialCommitCount;
         readOnly = nativeIsReadOnly(transaction);
 
-        creationThrowable = WARN_FINALIZER ? new Throwable() : null;
+        creationThrowable = TRACK_CREATION_STACK ? new Throwable() : null;
     }
 
     @Override
     protected void finalize() throws Throwable {
-        if (WARN_FINALIZER && !closed && creationThrowable != null) {
-            System.err.println("Transaction was not closed. It was initially created here:");
-            creationThrowable.printStackTrace();
+        // Committed & aborted transactions are fine: remaining native resources are not expensive
+        if (!closed && nativeIsActive(transaction)) { // TODO what about recycled state?
+            System.err.println("Transaction was not finished (initial commit count: " + initialCommitCount + ").");
+            if (creationThrowable != null) {
+                System.err.println("Transaction was initially created here:");
+                creationThrowable.printStackTrace();
+            }
+            System.err.flush();
         }
         close();
         super.finalize();
@@ -115,20 +125,27 @@ public class Transaction implements Closeable {
         nativeAbort(transaction);
     }
 
-    /** Efficient for read transactions. */
+    /**
+     * Will throw if Cursors are still active for this TX.
+     * Efficient for read transactions.
+     */
+    @Experimental
     public void reset() {
         checkOpen();
         initialCommitCount = store.commitCount;
         nativeReset(transaction);
     }
 
-    /** For read transactions. */
+    /**
+     * For read transactions, this releases important native resources that hold on versions of potential old data.
+     * To continue, use {@link #renew()}.
+     */
     public void recycle() {
         checkOpen();
         nativeRecycle(transaction);
     }
 
-    /** Efficient for read transactions. */
+    /** Renews a previously recycled transaction (see {@link #recycle()}). Efficient for read transactions. */
     public void renew() {
         checkOpen();
         initialCommitCount = store.commitCount;
