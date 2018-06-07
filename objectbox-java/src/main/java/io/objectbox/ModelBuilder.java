@@ -48,40 +48,51 @@ public class ModelBuilder {
     Long lastRelationUid;
 
     public class PropertyBuilder {
+        private final int type;
+        private final int virtualTargetOffset;
+        private final int propertyNameOffset;
+        private final int targetEntityOffset;
+
+        private int secondaryNameOffset;
         boolean finished;
+        private int flags;
+        private int id;
+        private long uid;
+        private int indexId;
+        private long indexUid;
 
         PropertyBuilder(String name, String targetEntityName, String virtualTarget, int type) {
-            int propertyNameOffset = fbb.createString(name);
-            int targetEntityOffset = targetEntityName != null ? fbb.createString(targetEntityName) : 0;
-            int virtualTargetOffset = virtualTarget != null ? fbb.createString(virtualTarget) : 0;
-            ModelProperty.startModelProperty(fbb);
-            ModelProperty.addName(fbb, propertyNameOffset);
-            if (targetEntityOffset != 0) {
-                ModelProperty.addTargetEntity(fbb, targetEntityOffset);
-            }
-            if (virtualTargetOffset != 0) {
-                ModelProperty.addVirtualTarget(fbb, virtualTargetOffset);
-            }
-            ModelProperty.addType(fbb, type);
+            this.type = type;
+            propertyNameOffset = fbb.createString(name);
+            targetEntityOffset = targetEntityName != null ? fbb.createString(targetEntityName) : 0;
+            virtualTargetOffset = virtualTarget != null ? fbb.createString(virtualTarget) : 0;
         }
 
         public PropertyBuilder id(int id, long uid) {
             checkNotFinished();
-            int idOffset = IdUid.createIdUid(fbb, id, uid);
-            ModelProperty.addId(fbb, idOffset);
+            this.id = id;
+            this.uid = uid;
             return this;
         }
 
         public PropertyBuilder indexId(int indexId, long indexUid) {
             checkNotFinished();
-            int idOffset = IdUid.createIdUid(fbb, indexId, indexUid);
-            ModelProperty.addIndexId(fbb, idOffset);
+            this.indexId = indexId;
+            this.indexUid = indexUid;
             return this;
         }
 
         public PropertyBuilder flags(int flags) {
             checkNotFinished();
-            ModelProperty.addFlags(fbb, flags);
+            this.flags = flags;
+            return this;
+        }
+
+        public PropertyBuilder secondaryName(String secondaryName) {
+            checkNotFinished();
+            if (secondaryName != null) {
+                secondaryNameOffset = fbb.createString(secondaryName);
+            }
             return this;
         }
 
@@ -94,6 +105,29 @@ public class ModelBuilder {
         public int finish() {
             checkNotFinished();
             finished = true;
+            ModelProperty.startModelProperty(fbb);
+            ModelProperty.addName(fbb, propertyNameOffset);
+            if (targetEntityOffset != 0) {
+                ModelProperty.addTargetEntity(fbb, targetEntityOffset);
+            }
+            if (virtualTargetOffset != 0) {
+                ModelProperty.addVirtualTarget(fbb, virtualTargetOffset);
+            }
+            if (secondaryNameOffset != 0) {
+                ModelProperty.addNameSecondary(fbb, secondaryNameOffset);
+            }
+            if (id != 0) {
+                int idOffset = IdUid.createIdUid(fbb, id, uid);
+                ModelProperty.addId(fbb, idOffset);
+            }
+            if (indexId != 0) {
+                int indexIdOffset = IdUid.createIdUid(fbb, indexId, indexUid);
+                ModelProperty.addIndexId(fbb, indexIdOffset);
+            }
+            ModelProperty.addType(fbb, type);
+            if (flags != 0) {
+                ModelProperty.addFlags(fbb, flags);
+            }
             return ModelProperty.endModelProperty(fbb);
         }
     }

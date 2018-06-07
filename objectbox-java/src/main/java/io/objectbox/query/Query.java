@@ -1,3 +1,19 @@
+/*
+ * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.objectbox.query;
 
 import java.util.Collections;
@@ -29,6 +45,7 @@ import io.objectbox.relation.ToOne;
  * @author Markus
  * @see QueryBuilder
  */
+@SuppressWarnings({"SameParameterValue", "UnusedReturnValue", "WeakerAccess"})
 @Beta
 public class Query<T> {
 
@@ -41,6 +58,36 @@ public class Query<T> {
     native List nativeFind(long handle, long cursorHandle, long offset, long limit);
 
     native long[] nativeFindKeysUnordered(long handle, long cursorHandle);
+
+    native String[] nativeFindStrings(long handle, long cursorHandle, int propertyId, boolean distinct,
+                                      boolean distinctNoCase, boolean enableNull, String nullValue);
+
+    native long[] nativeFindLongs(long handle, long cursorHandle, int propertyId, boolean distinct, boolean enableNull,
+                                  long nullValue);
+
+    native int[] nativeFindInts(long handle, long cursorHandle, int propertyId, boolean distinct, boolean enableNull,
+                                int nullValue);
+
+    native short[] nativeFindShorts(long handle, long cursorHandle, int propertyId, boolean distinct,
+                                    boolean enableNull, short nullValue);
+
+    native char[] nativeFindChars(long handle, long cursorHandle, int propertyId, boolean distinct, boolean enableNull,
+                                  char nullValue);
+
+    native byte[] nativeFindBytes(long handle, long cursorHandle, int propertyId, boolean distinct, boolean enableNull,
+                                  byte nullValue);
+
+    native float[] nativeFindFloats(long handle, long cursorHandle, int propertyId, boolean distinct,
+                                    boolean enableNull, float nullValue);
+
+    native double[] nativeFindDoubles(long handle, long cursorHandle, int propertyId, boolean distinct,
+                                      boolean enableNull, double nullValue);
+
+    native Object nativeFindNumber(long handle, long cursorHandle, int propertyId, boolean unique, boolean distinct,
+                                   boolean enableNull, long nullValue, float nullValueFloat, double nullValueDouble);
+
+    native String nativeFindString(long handle, long cursorHandle, int propertyId, boolean unique, boolean distinct,
+                                   boolean distinctCase, boolean enableNull, String nullValue);
 
     native long nativeCount(long handle, long cursorHandle);
 
@@ -60,19 +107,19 @@ public class Query<T> {
 
     native long nativeRemove(long handle, long cursorHandle);
 
-    native void nativeSetParameter(long handle, int propertyId, String parameterAlias, String value);
+    native void nativeSetParameter(long handle, int propertyId, @Nullable String parameterAlias, String value);
 
-    native void nativeSetParameter(long handle, int propertyId, String parameterAlias, long value);
+    native void nativeSetParameter(long handle, int propertyId, @Nullable String parameterAlias, long value);
 
-    native void nativeSetParameters(long handle, int propertyId, String parameterAlias, long value1,
+    native void nativeSetParameters(long handle, int propertyId, @Nullable String parameterAlias, long value1,
                                     long value2);
 
-    native void nativeSetParameter(long handle, int propertyId, String parameterAlias, double value);
+    native void nativeSetParameter(long handle, int propertyId, @Nullable String parameterAlias, double value);
 
-    native void nativeSetParameters(long handle, int propertyId, String parameterAlias, double value1,
+    native void nativeSetParameters(long handle, int propertyId, @Nullable String parameterAlias, double value1,
                                     double value2);
 
-    private final Box<T> box;
+    final Box<T> box;
     private final BoxStore store;
     private final boolean hasOrder;
     private final QueryPublisher<T> publisher;
@@ -113,21 +160,26 @@ public class Query<T> {
         }
     }
 
+    /** To be called inside a read TX */
+    long cursorHandle() {
+        return InternalAccess.getActiveTxCursorHandle(box);
+    }
+
     /**
      * Find the first Object matching the query.
      */
     @Nullable
     public T findFirst() {
         ensureNoFilterNoComparator();
-        return store.callInReadTxWithRetry(new Callable<T>() {
+        return callInReadTx(new Callable<T>() {
             @Override
             public T call() {
                 @SuppressWarnings("unchecked")
-                T entity = (T) nativeFindFirst(handle, InternalAccess.getActiveTxCursorHandle(box));
+                T entity = (T) nativeFindFirst(handle, cursorHandle());
                 resolveEagerRelation(entity);
                 return entity;
             }
-        }, queryAttempts, initialRetryBackOffInMs, true);
+        });
     }
 
     private void ensureNoFilterNoComparator() {
@@ -153,15 +205,15 @@ public class Query<T> {
     @Nullable
     public T findUnique() {
         ensureNoFilterNoComparator();
-        return store.callInReadTxWithRetry(new Callable<T>() {
+        return callInReadTx(new Callable<T>() {
             @Override
             public T call() {
                 @SuppressWarnings("unchecked")
-                T entity = (T) nativeFindUnique(handle, InternalAccess.getActiveTxCursorHandle(box));
+                T entity = (T) nativeFindUnique(handle, cursorHandle());
                 resolveEagerRelation(entity);
                 return entity;
             }
-        }, queryAttempts, initialRetryBackOffInMs, true);
+        });
     }
 
     /**
@@ -169,11 +221,10 @@ public class Query<T> {
      */
     @Nonnull
     public List<T> find() {
-        return store.callInReadTxWithRetry(new Callable<List<T>>() {
+        return callInReadTx(new Callable<List<T>>() {
             @Override
             public List<T> call() throws Exception {
-                long cursorHandle = InternalAccess.getActiveTxCursorHandle(box);
-                List<T> entities = nativeFind(Query.this.handle, cursorHandle, 0, 0);
+                List<T> entities = nativeFind(Query.this.handle, cursorHandle(), 0, 0);
                 if (filter != null) {
                     Iterator<T> iterator = entities.iterator();
                     while (iterator.hasNext()) {
@@ -189,7 +240,7 @@ public class Query<T> {
                 }
                 return entities;
             }
-        }, queryAttempts, initialRetryBackOffInMs, true);
+        });
     }
 
     /**
@@ -198,15 +249,14 @@ public class Query<T> {
     @Nonnull
     public List<T> find(final long offset, final long limit) {
         ensureNoFilterNoComparator();
-        return store.callInReadTxWithRetry(new Callable<List<T>>() {
+        return callInReadTx(new Callable<List<T>>() {
             @Override
             public List<T> call() {
-                long cursorHandle = InternalAccess.getActiveTxCursorHandle(box);
-                List entities = nativeFind(handle, cursorHandle, offset, limit);
+                List entities = nativeFind(handle, cursorHandle(), offset, limit);
                 resolveEagerRelations(entities);
                 return entities;
             }
-        }, queryAttempts, initialRetryBackOffInMs, true);
+        });
     }
 
     /**
@@ -234,6 +284,24 @@ public class Query<T> {
     public LazyList<T> findLazy() {
         ensureNoFilterNoComparator();
         return new LazyList<>(box, findIds(), false);
+    }
+
+    // TODO we might move all those property find methods in a "PropertyQuery" class for divide & conquer.
+
+    /**
+     * Creates a {@link PropertyQuery} for the given property.
+     * <p>
+     * A {@link PropertyQuery} uses the same conditions as this Query object,
+     * but returns only the value(s) of a single property (not an entity objects).
+     *
+     * @param property the property for which to return values
+     */
+    public PropertyQuery property(Property property) {
+        return new PropertyQuery(this, property);
+    }
+
+    <R> R callInReadTx(Callable<R> callable) {
+        return store.callInReadTxWithRetry(callable, queryAttempts, initialRetryBackOffInMs, true);
     }
 
     /**
@@ -341,76 +409,47 @@ public class Query<T> {
         });
     }
 
-    /** Sums up all values for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public long sum(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Long>() {
-            @Override
-            public Long call(long cursorHandle) {
-                return nativeSum(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).sum();
     }
 
-    /** Sums up all values for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public double sumDouble(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Double>() {
-            @Override
-            public Double call(long cursorHandle) {
-                return nativeSumDouble(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).sumDouble();
     }
 
-    /** Finds the maximum value for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public long max(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Long>() {
-            @Override
-            public Long call(long cursorHandle) {
-                return nativeMax(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).max();
     }
 
-    /** Finds the maximum value for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public double maxDouble(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Double>() {
-            @Override
-            public Double call(long cursorHandle) {
-                return nativeMaxDouble(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).maxDouble();
     }
 
-    /** Finds the minimum value for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public long min(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Long>() {
-            @Override
-            public Long call(long cursorHandle) {
-                return nativeMin(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).min();
     }
 
-    /** Finds the minimum value for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public double minDouble(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Double>() {
-            @Override
-            public Double call(long cursorHandle) {
-                return nativeMinDouble(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).minDouble();
     }
 
-    /** Calculates the average of all values for the given property over all Objects matching the query. */
+    /** @deprecated Use {@link #property(Property)} to get a {@link PropertyQuery} for aggregate functions. */
+    @Deprecated
     public double avg(final Property property) {
-        return box.internalCallWithReaderHandle(new CallWithHandle<Double>() {
-            @Override
-            public Double call(long cursorHandle) {
-                return nativeAvg(handle, cursorHandle, property.getId());
-            }
-        });
+        return property(property).avg();
     }
-
 
     /**
      * Sets a parameter previously given to the {@link QueryBuilder} to a new value.

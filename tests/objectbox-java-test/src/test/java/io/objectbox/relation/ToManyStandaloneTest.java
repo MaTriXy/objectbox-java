@@ -18,23 +18,56 @@ package io.objectbox.relation;
 
 import org.junit.Test;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import io.objectbox.TestUtils;
-import io.objectbox.query.QueryFilter;
+import io.objectbox.Cursor;
+import io.objectbox.InternalAccess;
 
 import static org.junit.Assert.*;
 
-public class ToManyTest extends AbstractRelationTest {
+/**
+ * Testing "standalone" relations (no to-one property).
+ */
+public class ToManyStandaloneTest extends AbstractRelationTest {
+
+    @Test
+    public void testPutAndGetPrimitives() {
+        Order order1 = putOrder(null, "order1");
+        Order order2 = putOrder(null, "order2");
+        Customer customer = putCustomer();
+
+        Cursor<Customer> cursorSource = InternalAccess.getWriter(customerBox);
+        long[] orderIds = {order1.getId(), order2.getId()};
+        cursorSource.modifyRelations(1, customer.getId(), orderIds, false);
+        RelationInfo<Order> info = Customer_.ordersStandalone;
+        int sourceEntityId = info.sourceInfo.getEntityId();
+        Cursor<Order> targetCursor = cursorSource.getTx().createCursor(Order.class);
+        List<Order> related = targetCursor.getRelationEntities(sourceEntityId, info.relationId, customer.getId());
+        assertEquals(2, related.size());
+        assertEquals(order1.getId(), related.get(0).getId());
+        assertEquals(order2.getId(), related.get(1).getId());
+
+        // Also
+        InternalAccess.commitWriter(customerBox, cursorSource);
+        assertEquals(2, orderBox.internalGetRelationEntities(sourceEntityId, info.relationId, customer.getId()).size());
+    }
 
     @Test
     public void testGet() {
         Customer customer = putCustomerWithOrders(2);
         customer = customerBox.get(customer.getId());
-        ToMany<Order> toMany = (ToMany<Order>) customer.getOrders();
+        final ToMany<Order> toMany = customer.getOrdersStandalone();
+
+        //        RelationInfo<Order> info = Customer_.ordersStandalone;
+        //        int sourceEntityId = info.sourceInfo.getEntityId();
+        //        assertEquals(2, orderBox.internalGetRelationEntities(sourceEntityId, info.relationId, customer.getId()).size());
+
+        assertGetOrder1And2(toMany);
+    }
+
+    private void assertGetOrder1And2(ToMany<Order> toMany) {
         assertFalse(toMany.isResolved());
         assertEquals(2, toMany.size());
         assertTrue(toMany.isResolved());
@@ -44,12 +77,30 @@ public class ToManyTest extends AbstractRelationTest {
     }
 
     @Test
+    public void testGetInTx() {
+        Customer customer = putCustomerWithOrders(2);
+        customer = customerBox.get(customer.getId());
+        final ToMany<Order> toMany = customer.getOrdersStandalone();
+
+        store.runInReadTx(new Runnable() {
+            @Override
+            public void run() {
+                assertGetOrder1And2(toMany);
+            }
+        });
+    }
+
+    @Test
     public void testReset() {
         Customer customer = putCustomerWithOrders(2);
         customer = customerBox.get(customer.getId());
-        ToMany<Order> toMany = (ToMany<Order>) customer.getOrders();
+        ToMany<Order> toMany = customer.getOrdersStandalone();
         assertEquals(2, toMany.size());
-        putOrder(customer, "order3");
+
+        Customer customer2 = customerBox.get(customer.getId());
+        customer2.getOrdersStandalone().add(putOrder(null, "order3"));
+        customer2.getOrdersStandalone().applyChangesToDb();
+
         assertEquals(2, toMany.size());
         toMany.reset();
         assertFalse(toMany.isResolved());
@@ -82,38 +133,37 @@ public class ToManyTest extends AbstractRelationTest {
     }
 
     private void testPutCustomerWithOrders(Customer customer, int countNewOrders, int countExistingOrders) {
+        ToMany<Order> toMany = customer.ordersStandalone;
         for (int i = 1; i <= countNewOrders; i++) {
             Order order = new Order();
             order.setText("new" + i);
-            customer.orders.add(order);
+            toMany.add(order);
         }
         for (int i = 1; i <= countExistingOrders; i++) {
-            customer.orders.add(putOrder(null, "existing" + i));
+            toMany.add(putOrder(null, "existing" + i));
         }
 
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
         assertEquals(countNewOrders + countExistingOrders, toMany.getAddCount());
         customerBox.put(customer);
         assertEquals(1, customer.getId());
         assertEquals(0, toMany.getAddCount());
 
         for (int i = 1; i <= countNewOrders; i++) {
-            assertEquals(countExistingOrders + i, customer.orders.get(i - 1).getId());
+            assertEquals(countExistingOrders + i, toMany.get(i - 1).getId());
         }
 
         assertEquals(1, customerBox.count());
         assertEquals(countNewOrders + countExistingOrders, orderBox.count());
 
-        for (Order order : customer.orders) {
-            assertEquals(customer.getId(), order.getCustomerId());
-            assertEquals(customer.getId(), orderBox.get(order.getId()).getCustomerId());
+        for (Order order : customer.ordersStandalone) {
+            assertEquals(0, order.getCustomerId()); // Standalone relations do not set the ID
         }
     }
 
     @Test
     public void testAddAll() {
         Customer customer = putCustomer();
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
 
         List<Order> orders = new ArrayList<>();
         Order order1 = new Order();
@@ -128,9 +178,7 @@ public class ToManyTest extends AbstractRelationTest {
         List<Order> all = orderBox.getAll();
         assertEquals(2, all.size());
         assertEquals("order1", all.get(0).getText());
-        assertEquals(customer.getId(), all.get(0).getCustomerId());
         assertEquals("order2", all.get(1).getText());
-        assertEquals(customer.getId(), all.get(1).getCustomerId());
 
         toMany.reset();
         assertEquals(2, toMany.size());
@@ -140,21 +188,18 @@ public class ToManyTest extends AbstractRelationTest {
     public void testClear() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-        assertFalse(toMany.isResolved());
-
+        ToMany<Order> toMany = customer.ordersStandalone;
         toMany.clear();
-        assertEquals(count, countOrdersWithCustomerId(customer.getId()));
         customerBox.put(customer);
-        assertEquals(0, countOrdersWithCustomerId(customer.getId()));
+        Customer customer2 = customerBox.get(customer.getId());
+        assertEquals(0, customer2.getOrdersStandalone().size());
         assertEquals(count, orderBox.count());
-        assertEquals(count, countOrdersWithCustomerId(0));
     }
 
     @Test
     public void testClear_removeFromTargetBox() {
         Customer customer = putCustomerWithOrders(5);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         toMany.setRemoveFromTargetBox(true);
         toMany.clear();
         customerBox.put(customer);
@@ -165,7 +210,7 @@ public class ToManyTest extends AbstractRelationTest {
     public void testRemove() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         Order removed1 = toMany.remove(3);
         assertEquals("order4", removed1.getText());
         Order removed2 = toMany.get(1);
@@ -175,10 +220,21 @@ public class ToManyTest extends AbstractRelationTest {
     }
 
     @Test
+    public void testAddRemove_notPersisted() {
+        Customer customer = putCustomer();
+        ToMany<Order> toMany = customer.ordersStandalone;
+        Order order = new Order();
+        toMany.add(order);
+        toMany.remove(order);
+        customerBox.put(customer);
+        assertEquals(0, orderBox.count());
+    }
+
+    @Test
     public void testRemoveAll() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         List<Order> toRemove = new ArrayList<>();
         toRemove.add(toMany.get(1));
         toRemove.add(toMany.get(3));
@@ -188,24 +244,10 @@ public class ToManyTest extends AbstractRelationTest {
     }
 
     @Test
-    public void testRemoveById() {
-        int count = 5;
-        Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-        Order removed1 = toMany.removeById(toMany.get(3).getId());
-        assertEquals("order4", removed1.getText());
-        Order removed2 = toMany.removeById(toMany.get(1).getId());
-        assertEquals("order2", removed2.getText());
-        assertNull(toMany.removeById(42));
-        customerBox.put(customer);
-        assertOrder2And4Removed(count, customer, toMany);
-    }
-
-    @Test
     public void testRetainAll() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         List<Order> toRetain = new ArrayList<>();
         toRetain.add(toMany.get(0));
         toRetain.add(toMany.get(2));
@@ -219,7 +261,7 @@ public class ToManyTest extends AbstractRelationTest {
     public void testSet() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         Order order1 = new Order();
         order1.setText("new1");
         assertEquals("order2", toMany.set(1, order1).getText());
@@ -239,9 +281,7 @@ public class ToManyTest extends AbstractRelationTest {
     }
 
     private void assertOrder2And4Removed(int count, Customer customer, ToMany<Order> toMany) {
-        assertEquals(count - 2, countOrdersWithCustomerId(customer.getId()));
         assertEquals(count, orderBox.count());
-        assertEquals(2, countOrdersWithCustomerId(0));
 
         toMany.reset();
         assertEquals(3, toMany.size());
@@ -254,7 +294,7 @@ public class ToManyTest extends AbstractRelationTest {
     public void testAddRemoved() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         Order order = toMany.get(2);
         assertTrue(toMany.remove(order));
         assertTrue(toMany.add(order));
@@ -266,18 +306,11 @@ public class ToManyTest extends AbstractRelationTest {
         assertEquals(count, orderBox.count());
     }
 
-    @Test(expected = IllegalStateException.class)
-    public void testSyncToTargetBox_detached() {
-        Customer customer = new Customer();
-        customer.setId(42);
-        ((ToMany) customer.orders).applyChangesToDb();
-    }
-
     @Test
     public void testSyncToTargetBox() {
         int count = 5;
         Customer customer = putCustomerWithOrders(count);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         Order order = toMany.get(2);
         assertTrue(toMany.retainAll(Collections.singletonList(order)));
 
@@ -301,13 +334,13 @@ public class ToManyTest extends AbstractRelationTest {
 
         assertFalse(toMany.internalCheckApplyToDbRequired());
         customerBox.put(customer);
-        assertEquals(3, customerBox.get(customer.getId()).orders.size());
+        assertEquals(3, customerBox.get(customer.getId()).ordersStandalone.size());
     }
 
     @Test
     public void testSortById() {
         Customer customer = putCustomerWithOrders(1);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
+        ToMany<Order> toMany = customer.ordersStandalone;
         Order orderNew1 = new Order();
         orderNew1.setText("new1");
         toMany.add(orderNew1);
@@ -327,93 +360,15 @@ public class ToManyTest extends AbstractRelationTest {
         assertEquals("new2", toMany.get(4).getText());
     }
 
-    @Test
-    public void testHasA() {
-        Customer customer = putCustomerWithOrders(3);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-        QueryFilter<Order> filter = new QueryFilter<Order>() {
-            @Override
-            public boolean keep(Order entity) {
-                return "order2".equals(entity.text);
-            }
-        };
-        assertTrue(toMany.hasA(filter));
-        toMany.remove(1);
-        assertFalse(toMany.hasA(filter));
-    }
-
-    @Test
-    public void testHasAll() {
-        Customer customer = putCustomerWithOrders(3);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-        QueryFilter<Order> filter = new QueryFilter<Order>() {
-            @Override
-            public boolean keep(Order entity) {
-                return entity.text.startsWith("order");
-            }
-        };
-        assertTrue(toMany.hasAll(filter));
-        toMany.get(0).text = "nope";
-        assertFalse(toMany.hasAll(filter));
-        toMany.clear();
-        assertFalse(toMany.hasAll(filter));
-    }
-
-    @Test
-    public void testIndexOfId() {
-        Customer customer = putCustomerWithOrders(3);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-        assertEquals(1, toMany.indexOfId(toMany.get(1).getId()));
-        assertEquals(2, toMany.indexOfId(toMany.get(2).getId()));
-        assertEquals(0, toMany.indexOfId(toMany.get(0).getId()));
-        assertEquals(-1, toMany.indexOfId(42));
-    }
-
-    @Test
-    public void testGetById() {
-        Customer customer = putCustomerWithOrders(3);
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-        assertEquals(toMany.get(1), toMany.getById(toMany.get(1).getId()));
-        assertEquals(toMany.get(2), toMany.getById(toMany.get(2).getId()));
-        assertEquals(toMany.get(0), toMany.getById(toMany.get(0).getId()));
-        assertNull(toMany.getById(42));
-    }
-
-    @Test
-    public void testSerializable() throws IOException, ClassNotFoundException {
-        Customer customer = new Customer();
-        customer.setName("source");
-        ToMany<Order> toMany = (ToMany<Order>) customer.orders;
-
-        Customer entityDeserialized = (Customer) TestUtils.serializeDeserialize(toMany).getEntity();
-        assertEquals("source", entityDeserialized.getName());
-
-        Order target = new Order();
-        target.setText("target");
-        toMany.add(target);
-
-        ToMany<Order> toManyDeserialized = TestUtils.serializeDeserialize(toMany);
-        assertEquals(1, toManyDeserialized.size());
-        Order order = toManyDeserialized.get(0);
-        assertEquals("target", order.getText());
-
-        try {
-            customerBox.put((Customer) toManyDeserialized.getEntity());
-        } catch (IllegalStateException e) {
-            // TODO "The ToOne property for Order.customerId is null" -> ToOne is transient; investigate more?
-            e.printStackTrace();
-        }
-    }
-
-    private long countOrdersWithCustomerId(long customerId) {
-        return orderBox.query().equal(Order_.customerId, customerId).build().count();
-    }
-
     private Customer putCustomerWithOrders(int orderCount) {
-        Customer customer = putCustomer();
+        Customer customer = new Customer();
+        customer.setName("Joe");
         for (int i = 1; i <= orderCount; i++) {
-            putOrder(customer, "order" + i);
+            Order order = new Order();
+            order.setText("order" + i);
+            customer.getOrdersStandalone().add(order);
         }
+        customerBox.put(customer);
         return customer;
     }
 }

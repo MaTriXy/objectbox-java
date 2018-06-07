@@ -29,6 +29,7 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
 import io.objectbox.annotation.apihint.Beta;
+import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.annotation.apihint.Temporary;
 import io.objectbox.exception.DbException;
@@ -275,9 +276,18 @@ public class Box<T> {
      * Returns the count of all stored objects in this box.
      */
     public long count() {
+        return count(0);
+    }
+
+    /**
+     * Returns the count of all stored objects in this box or the given maxCount, whichever is lower.
+     *
+     * @param maxCount maximum value to count or 0 (zero) to have no maximum limit
+     */
+    public long count(long maxCount) {
         Cursor<T> reader = getReader();
         try {
-            return reader.count();
+            return reader.count(maxCount);
         } finally {
             releaseReader(reader);
         }
@@ -468,6 +478,7 @@ public class Box<T> {
     /**
      * Removes (deletes) the given Objects in a single transaction.
      */
+    @SuppressWarnings("Duplicates") // Detected duplicate has different type
     public void remove(@Nullable T... objects) {
         if (objects == null || objects.length == 0) {
             return;
@@ -487,6 +498,7 @@ public class Box<T> {
     /**
      * Removes (deletes) the given Objects in a single transaction.
      */
+    @SuppressWarnings("Duplicates") // Detected duplicate has different type
     public void remove(@Nullable Collection<T> objects) {
         if (objects == null || objects.isEmpty()) {
             return;
@@ -514,6 +526,17 @@ public class Box<T> {
         } finally {
             releaseWriter(cursor);
         }
+    }
+
+    /**
+     * WARNING: this method should generally be avoided as it is not transactional and thus may leave the DB in an
+     * inconsistent state. It may be the a last resort option to recover from a full DB.
+     * Like removeAll(), it removes all objects, returns the count of objects removed.
+     * Logs progress using warning log level.
+     */
+    @Experimental
+    public long panicModeRemoveAll() {
+        return store.panicModeRemoveAllObjects(getEntityInfo().getEntityId());
     }
 
     /**

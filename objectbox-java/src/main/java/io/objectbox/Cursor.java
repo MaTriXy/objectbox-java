@@ -19,12 +19,15 @@ package io.objectbox;
 import java.io.Closeable;
 import java.util.List;
 
+import javax.annotation.Nullable;
 import javax.annotation.concurrent.NotThreadSafe;
 
 import io.objectbox.annotation.apihint.Beta;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.annotation.apihint.Temporary;
+import io.objectbox.relation.ToMany;
 
+@SuppressWarnings({"unchecked", "SameParameterValue", "unused"})
 @Beta
 @Internal
 @NotThreadSafe
@@ -55,7 +58,7 @@ public abstract class Cursor<T> implements Closeable {
 
     static native Object nativeFirstEntity(long cursor);
 
-    static native long nativeCount(long cursor);
+    static native long nativeCount(long cursor, long maxCountOrZero);
 
     static native List nativeFindScalarPropertyId(long cursor, int propertyId, long value);
 
@@ -69,9 +72,10 @@ public abstract class Cursor<T> implements Closeable {
     static native long nativeRenew(long cursor);
 
     protected static native long collect313311(long cursor, long keyIfComplete, int flags,
-                                               int idStr1, String valueStr1, int idStr2, String valueStr2,
-                                               int idStr3, String valueStr3,
-                                               int idBA1, byte[] valueBA1,
+                                               int idStr1, @Nullable String valueStr1,
+                                               int idStr2, @Nullable String valueStr2,
+                                               int idStr3, @Nullable String valueStr3,
+                                               int idBA1, @Nullable byte[] valueBA1,
                                                int idLong1, long valueLong1, int idLong2, long valueLong2,
                                                int idLong3, long valueLong3,
                                                int idInt1, int valueInt1, int idInt2, int valueInt2,
@@ -80,15 +84,20 @@ public abstract class Cursor<T> implements Closeable {
     );
 
     protected static native long collect430000(long cursor, long keyIfComplete, int flags,
-                                               int idStr1, String valueStr1, int idStr2, String valueStr2,
-                                               int idStr3, String valueStr3, int idStr4, String valueStr4,
-                                               int idBA1, byte[] valueBA1, int idBA2, byte[] valueBA2, int idBA3,
-                                               byte[] valueBA3
+                                               int idStr1, @Nullable String valueStr1,
+                                               int idStr2, @Nullable String valueStr2,
+                                               int idStr3, @Nullable String valueStr3,
+                                               int idStr4, @Nullable String valueStr4,
+                                               int idBA1, @Nullable byte[] valueBA1,
+                                               int idBA2, @Nullable byte[] valueBA2,
+                                               int idBA3, @Nullable byte[] valueBA3
     );
 
     protected static native long collect400000(long cursor, long keyIfComplete, int flags,
-                                               int idStr1, String valueStr1, int idStr2, String valueStr2,
-                                               int idStr3, String valueStr3, int idStr4, String valueStr4
+                                               int idStr1, @Nullable String valueStr1,
+                                               int idStr2, @Nullable String valueStr2,
+                                               int idStr3, @Nullable String valueStr3,
+                                               int idStr4, @Nullable String valueStr4
     );
 
     protected static native long collect002033(long cursor, long keyIfComplete, int flags,
@@ -206,8 +215,8 @@ public abstract class Cursor<T> implements Closeable {
         return nativeSeek(cursor, key);
     }
 
-    public long count() {
-        return nativeCount(cursor);
+    public long count(long maxCountOrZero) {
+        return nativeCount(cursor, maxCountOrZero);
     }
 
     @Override
@@ -266,7 +275,7 @@ public abstract class Cursor<T> implements Closeable {
 
     /**
      * To be used in combination with {@link Transaction#renew()}.
-     * */
+     */
     public void renew() {
         nativeRenew(cursor);
     }
@@ -299,6 +308,20 @@ public abstract class Cursor<T> implements Closeable {
     @Internal
     public void modifyRelationsSingle(int relationId, long key, long targetKey, boolean remove) {
         nativeModifyRelationsSingle(cursor, relationId, key, targetKey, remove);
+    }
+
+    protected <TARGET> void checkApplyToManyToDb(List<TARGET> orders, Class<TARGET> targetClass) {
+        if (orders instanceof ToMany) {
+            ToMany<TARGET> toMany = (ToMany<TARGET>) orders;
+            if (toMany.internalCheckApplyToDbRequired()) {
+                Cursor<TARGET> targetCursor = getRelationTargetCursor(targetClass);
+                try {
+                    toMany.internalApplyToDb(this, targetCursor);
+                } finally {
+                    targetCursor.close();
+                }
+            }
+        }
     }
 
     @Override

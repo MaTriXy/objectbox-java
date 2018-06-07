@@ -16,7 +16,16 @@
 
 package io.objectbox;
 
+import org.greenrobot.essentials.io.IoUtils;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -26,6 +35,7 @@ import javax.annotation.Nullable;
 
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
+import io.objectbox.exception.DbException;
 import io.objectbox.ideasonly.ModelUpdate;
 
 /**
@@ -80,6 +90,16 @@ public class BoxStoreBuilder {
     TxCallback failedReadTxAttemptCallback;
 
     final List<EntityInfo> entityInfoList = new ArrayList<>();
+    private Factory<InputStream> initialDbFileFactory;
+
+    /** Not for application use. */
+    public static BoxStoreBuilder createDebugWithoutModel() {
+        return new BoxStoreBuilder();
+    }
+
+    private BoxStoreBuilder() {
+        model = null;
+    }
 
     @Internal
     /** Called internally from the generated class "MyObjectBox". Check MyObjectBox.builder() to get an instance. */
@@ -169,7 +189,7 @@ public class BoxStoreBuilder {
         return this;
     }
 
-    static File getAndroidDbDir(Object context, String dbName) {
+    static File getAndroidDbDir(Object context, @Nullable String dbName) {
         File baseDir = getAndroidBaseDir(context);
         return new File(baseDir, dbName(dbName));
     }
@@ -298,6 +318,29 @@ public class BoxStoreBuilder {
     }
 
     /**
+     * Let's you specify an DB file to be used during initial start of the app (no DB file exists yet).
+     */
+    @Experimental
+    public BoxStoreBuilder initialDbFile(final File initialDbFile) {
+        return initialDbFile(new Factory<InputStream>() {
+            @Override
+            public InputStream provide() throws FileNotFoundException {
+                return new FileInputStream(initialDbFile);
+            }
+        });
+    }
+
+    /**
+     * Let's you specify a provider for a DB file to be used during initial start of the app (no DB file exists yet).
+     * The provider will only be called if no DB file exists yet.
+     */
+    @Experimental
+    public BoxStoreBuilder initialDbFile(Factory<InputStream> initialDbFileFactory) {
+        this.initialDbFileFactory = initialDbFileFactory;
+        return this;
+    }
+
+    /**
      * Builds a {@link BoxStore} using any given configuration.
      */
     public BoxStore build() {
@@ -305,7 +348,33 @@ public class BoxStoreBuilder {
             name = dbName(name);
             directory = getDbDir(baseDirectory, name);
         }
+        checkProvisionInitialDbFile();
         return new BoxStore(this);
+    }
+
+    private void checkProvisionInitialDbFile() {
+        if (initialDbFileFactory != null) {
+            String dataDir = BoxStore.getCanonicalPath(directory);
+            File file = new File(dataDir, "data.mdb");
+            if (!file.exists()) {
+                InputStream in = null;
+                OutputStream out = null;
+                try {
+                    in = initialDbFileFactory.provide();
+                    if (in == null) {
+                        throw new DbException("Factory did not provide a resource");
+                    }
+                    in = new BufferedInputStream(in);
+                    out = new BufferedOutputStream(new FileOutputStream(file));
+                    IoUtils.copyAllBytes(in, out);
+                } catch (Exception e) {
+                    throw new DbException("Could not provision initial data file", e);
+                } finally {
+                    IoUtils.safeClose(out);
+                    IoUtils.safeClose(in);
+                }
+            }
+        }
     }
 
     static File getDbDir(@Nullable File baseDirectoryOrNull, @Nullable String nameOrNull) {

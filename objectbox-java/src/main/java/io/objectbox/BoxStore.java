@@ -39,13 +39,12 @@ import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
 import javax.annotation.concurrent.ThreadSafe;
 
-import io.objectbox.annotation.apihint.Beta;
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.converter.PropertyConverter;
 import io.objectbox.exception.DbException;
+import io.objectbox.exception.DbExceptionListener;
 import io.objectbox.exception.DbSchemaException;
-import io.objectbox.internal.CrashReportLogger;
 import io.objectbox.internal.NativeLibraryLoader;
 import io.objectbox.internal.ObjectBoxThreadPool;
 import io.objectbox.reactive.DataObserver;
@@ -56,13 +55,14 @@ import io.objectbox.reactive.SubscriptionBuilder;
  * Represents an ObjectBox database and gives you {@link Box}es to get and put Objects of a specific type
  * (see {@link #boxFor(Class)}).
  */
-@Beta
+@SuppressWarnings({"unused", "UnusedReturnValue", "SameParameterValue", "WeakerAccess"})
 @ThreadSafe
 public class BoxStore implements Closeable {
 
+    private static final String VERSION = "1.5.0-2018-04-12";
     private static BoxStore defaultStore;
 
-    private static Set<String> openFiles = new HashSet<>();
+    private static final Set<String> openFiles = new HashSet<>();
 
     /**
      * Convenience singleton instance which gets set up using {@link BoxStoreBuilder#buildDefault()}.
@@ -97,14 +97,17 @@ public class BoxStore implements Closeable {
         return existedBefore;
     }
 
-    public static native String getVersionNative();
+    static native String nativeGetVersion();
+
+    public static String getVersionNative() {
+        NativeLibraryLoader.ensureLoaded();
+        return nativeGetVersion();
+    }
 
     /**
      * Diagnostics: If this method crashes on a device, please send us the logcat output.
      */
     public static native void testUnalignedMemoryAccess();
-
-    public static native void setCrashReportLogger(CrashReportLogger crashReportLogger);
 
     static native long nativeCreate(String directory, long maxDbSizeInKByte, int maxReaders, byte[] model);
 
@@ -115,9 +118,6 @@ public class BoxStore implements Closeable {
     static native long nativeBeginTx(long store);
 
     static native long nativeBeginReadTx(long store);
-
-    static native long nativeCreateIndex(long store, String name, int entityId, int propertyId);
-
 
     /** @return entity ID */
     // TODO only use ids once we have them in Java
@@ -131,15 +131,24 @@ public class BoxStore implements Closeable {
 
     static native int nativeCleanStaleReadTransactions(long store);
 
-    static native String nativeStartObjectBrowser(long store, String urlPath, int port);
+    static native void nativeSetDbExceptionListener(long store, DbExceptionListener dbExceptionListener);
 
     static native void nativeSetDebugFlags(long store, int debugFlags);
 
-    public static native boolean isObjectBrowserAvailable();
+    static native String nativeStartObjectBrowser(long store, @Nullable String urlPath, int port);
+
+    static native boolean nativeIsObjectBrowserAvailable();
+
+    public static boolean isObjectBrowserAvailable() {
+        NativeLibraryLoader.ensureLoaded();
+        return nativeIsObjectBrowserAvailable();
+    }
 
     public static String getVersion() {
-        return "1.3.3-2017-12-03";
+        return VERSION;
     }
+
+    native long nativePanicModeRemoveAllObjects(long store, int entityId);
 
     private final File directory;
     private final String canonicalPath;
@@ -177,18 +186,7 @@ public class BoxStore implements Closeable {
         NativeLibraryLoader.ensureLoaded();
 
         directory = builder.directory;
-        if (directory.exists()) {
-            if (!directory.isDirectory()) {
-                throw new DbException("Is not a directory: " + directory.getAbsolutePath());
-            }
-        } else if (!directory.mkdirs()) {
-            throw new DbException("Could not create directory: " + directory.getAbsolutePath());
-        }
-        try {
-            canonicalPath = directory.getCanonicalPath();
-        } catch (IOException e) {
-            throw new DbException("Could not verify dir", e);
-        }
+        canonicalPath = getCanonicalPath(directory);
         verifyNotAlreadyOpen(canonicalPath);
 
         handle = nativeCreate(canonicalPath, builder.maxSizeInKByte, builder.maxReaders, builder.model);
@@ -233,6 +231,21 @@ public class BoxStore implements Closeable {
 
         failedReadTxAttemptCallback = builder.failedReadTxAttemptCallback;
         queryAttempts = builder.queryAttempts < 1 ? 1 : builder.queryAttempts;
+    }
+
+    static String getCanonicalPath(File directory) {
+        if (directory.exists()) {
+            if (!directory.isDirectory()) {
+                throw new DbException("Is not a directory: " + directory.getAbsolutePath());
+            }
+        } else if (!directory.mkdirs()) {
+            throw new DbException("Could not create directory: " + directory.getAbsolutePath());
+        }
+        try {
+            return directory.getCanonicalPath();
+        } catch (IOException e) {
+            throw new DbException("Could not verify dir", e);
+        }
     }
 
     private static void verifyNotAlreadyOpen(String canonicalPath) {
@@ -378,7 +391,9 @@ public class BoxStore implements Closeable {
                 for (Transaction t : transactionsToClose) {
                     t.close();
                 }
-                nativeDelete(handle);
+                if (handle != 0) { // failed before native handle was created?
+                    nativeDelete(handle);
+                }
 
                 // When running the full unit test suite, we had 100+ threads before, hope this helps:
                 threadPool.shutdown();
@@ -403,7 +418,7 @@ public class BoxStore implements Closeable {
                 int count = Thread.enumerate(threads);
                 for (int i = 0; i < count; i++) {
                     System.err.println("Thread: " + threads[i].getName());
-                    threads[i].dumpStack();
+                    Thread.dumpStack();
                 }
             }
         } catch (InterruptedException e) {
@@ -505,7 +520,7 @@ public class BoxStore implements Closeable {
         nativeDropAllData(handle);
     }
 
-    void txCommitted(Transaction tx, int[] entityTypeIdsAffected) {
+    void txCommitted(Transaction tx, @Nullable int[] entityTypeIdsAffected) {
         // Only one write TX at a time, but there is a chance two writers race after commit: thus synchronize
         synchronized (txCommitCountLock) {
             commitCount++; // Overflow is OK because we check for equality
@@ -527,6 +542,7 @@ public class BoxStore implements Closeable {
     /**
      * Returns a Box for the given type. Objects are put into (and get from) their individual Box.
      */
+    @SuppressWarnings("unchecked")
     public <T> Box<T> boxFor(Class<T> entityClass) {
         Box box = boxes.get(entityClass);
         if (box == null) {
@@ -636,6 +652,7 @@ public class BoxStore implements Closeable {
                     cleanStaleReadTransactions();
                 }
                 if (failedReadTxAttemptCallback != null) {
+                    //noinspection unchecked
                     failedReadTxAttemptCallback.txFinished(null, new DbException(message + " \n" + diagnose, e));
                 }
                 try {
@@ -716,12 +733,24 @@ public class BoxStore implements Closeable {
     }
 
     /**
+     * Like {@link #callInTx(Callable)}, but throws no Exception.
+     * Any Exception thrown in the Callable is wrapped in a RuntimeException.
+     */
+    public <R> R callInTxNoException(Callable<R> callable) {
+        try {
+            return callInTx(callable);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
      * Runs the given Runnable as a transaction in a separate thread.
      * Once the transaction completes the given callback is called (callback may be null).
      * <p>
      * See also {@link #runInTx(Runnable)}.
      */
-    public void runInTxAsync(final Runnable runnable, final TxCallback<Void> callback) {
+    public void runInTxAsync(final Runnable runnable, @Nullable final TxCallback<Void> callback) {
         threadPool.submit(new Runnable() {
             @Override
             public void run() {
@@ -745,7 +774,7 @@ public class BoxStore implements Closeable {
      * <p>
      * * See also {@link #callInTx(Callable)}.
      */
-    public <R> void callInTxAsync(final Callable<R> callable, final TxCallback<R> callback) {
+    public <R> void callInTxAsync(final Callable<R> callable, @Nullable final TxCallback<R> callback) {
         threadPool.submit(new Runnable() {
             @Override
             public void run() {
@@ -852,9 +881,18 @@ public class BoxStore implements Closeable {
     }
 
     /**
+     * The given listener will be called when an exception is thrown.
+     * This for example allows a central error handling, e.g. a special logging for DB related exceptions.
+     */
+    public void setDbExceptionListener(DbExceptionListener dbExceptionListener) {
+        nativeSetDbExceptionListener(handle, dbExceptionListener);
+    }
+
+    /**
      * Like {@link #subscribe()}, but wires the supplied @{@link io.objectbox.reactive.DataObserver} only to the given
      * object class for notifications.
      */
+    @SuppressWarnings("unchecked")
     public <T> SubscriptionBuilder<Class<T>> subscribe(Class<T> forClass) {
         return new SubscriptionBuilder<>((DataPublisher) objectClassPublisher, forClass, threadPool);
     }
@@ -887,4 +925,9 @@ public class BoxStore implements Closeable {
     void setDebugFlags(int debugFlags) {
         nativeSetDebugFlags(handle, debugFlags);
     }
+
+    long panicModeRemoveAllObjects(int entityId) {
+        return nativePanicModeRemoveAllObjects(handle, entityId);
+    }
+
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright (C) 2017 Markus Junginger
+ * Copyright 2017 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,11 +21,15 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.ListIterator;
 import java.util.Map;
+
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import io.objectbox.Box;
 import io.objectbox.BoxStore;
@@ -37,8 +41,11 @@ import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.exception.DbDetachedException;
 import io.objectbox.internal.IdGetter;
 import io.objectbox.internal.ReflectionCache;
+import io.objectbox.internal.ToOneGetter;
 import io.objectbox.query.QueryFilter;
 import io.objectbox.relation.ListFactory.CopyOnWriteArrayListFactory;
+
+import static java.lang.Boolean.TRUE;
 
 /**
  * A List representing a to-many relation.
@@ -53,14 +60,19 @@ import io.objectbox.relation.ListFactory.CopyOnWriteArrayListFactory;
  *
  * @param <TARGET> Object type (entity).
  */
+@SuppressWarnings("unchecked")
 public class ToMany<TARGET> implements List<TARGET>, Serializable {
     private static final long serialVersionUID = 2367317778240689006L;
+    private final static Integer ONE = Integer.valueOf(1);
 
     private final Object entity;
     private final RelationInfo<TARGET> relationInfo;
 
     private ListFactory listFactory;
     private List<TARGET> entities;
+
+    /** Counts of all entities in the list ({@link #entities}). */
+    private Map<TARGET, Integer> entityCounts;
 
     /** Entities added since last put/sync. Map is used as a set (value is always Boolean.TRUE). */
     private Map<TARGET, Boolean> entitiesAdded;
@@ -69,7 +81,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
     private Map<TARGET, Boolean> entitiesRemoved;
 
     List<TARGET> entitiesToPut;
-    List<TARGET> entitiesToRemove;
+    List<TARGET> entitiesToRemoveFromDb;
 
     transient private BoxStore boxStore;
     transient private Box entityBox;
@@ -146,6 +158,13 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
                 if (entitiesAdded == null) {
                     entitiesAdded = new LinkedHashMap<>(); // Keep order of added items
                     entitiesRemoved = new LinkedHashMap<>(); // Keep order of added items
+                    entityCounts = new HashMap<>();
+                    for (TARGET object : entities) {
+                        Integer old = entityCounts.put(object, ONE);
+                        if (old != null) {
+                            entityCounts.put(object, old + 1);
+                        }
+                    }
                 }
             }
         }
@@ -184,47 +203,72 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         }
     }
 
-    @Override
     /**
      * Adds the given entity to the list and tracks the addition so it can be later applied to the database
      * (e.g. via {@link Box#put(Object)} of the entity owning the ToMany, or via {@link #applyChangesToDb()}).
      * Note that the given entity will remain unchanged at this point (e.g. to-ones are not updated).
      */
+    @Override
     public synchronized boolean add(TARGET object) {
-        ensureEntitiesWithTrackingLists();
-        entitiesAdded.put(object, Boolean.TRUE);
-        entitiesRemoved.remove(object);
+        trackAdd(object);
         return entities.add(object);
     }
 
-    @Override
-    /** See {@link #add(Object)} for general comments. */
-    public synchronized void add(int location, TARGET object) {
+    /** Must be called from a synchronized method */
+    private void trackAdd(TARGET object) {
         ensureEntitiesWithTrackingLists();
-        entitiesAdded.put(object, Boolean.TRUE);
+        Integer old = entityCounts.put(object, ONE);
+        if (old != null) {
+            entityCounts.put(object, old + 1);
+        }
+        entitiesAdded.put(object, TRUE);
         entitiesRemoved.remove(object);
-        entities.add(location, object);
     }
 
-    @Override
-    /** See {@link #add(Object)} for general comments. */
-    public synchronized boolean addAll(Collection<? extends TARGET> objects) {
-        putAllToAdded(objects);
-        return entities.addAll(objects);
-    }
-
-    private synchronized void putAllToAdded(Collection<? extends TARGET> objects) {
+    /** Must be called from a synchronized method */
+    private void trackAdd(Collection<? extends TARGET> objects) {
         ensureEntitiesWithTrackingLists();
         for (TARGET object : objects) {
-            entitiesAdded.put(object, Boolean.TRUE);
-            entitiesRemoved.remove(object);
+            trackAdd(object);
         }
     }
 
-    @Override
+    /** Must be called from a synchronized method */
+    private void trackRemove(TARGET object) {
+        ensureEntitiesWithTrackingLists();
+        Integer count = entityCounts.remove(object);
+        if (count != null) {
+            if (count == 1) {
+                entityCounts.remove(object);
+                entitiesAdded.remove(object);
+
+                entitiesRemoved.put(object, TRUE);
+            } else if (count > 1) {
+                entityCounts.put(object, count - 1);
+            } else {
+                throw new IllegalStateException("Illegal count: " + count);
+            }
+        }
+    }
+
     /** See {@link #add(Object)} for general comments. */
+    @Override
+    public synchronized void add(int location, TARGET object) {
+        trackAdd(object);
+        entities.add(location, object);
+    }
+
+    /** See {@link #add(Object)} for general comments. */
+    @Override
+    public synchronized boolean addAll(Collection<? extends TARGET> objects) {
+        trackAdd(objects);
+        return entities.addAll(objects);
+    }
+
+    /** See {@link #add(Object)} for general comments. */
+    @Override
     public synchronized boolean addAll(int index, Collection<? extends TARGET> objects) {
-        putAllToAdded(objects);
+        trackAdd(objects);
         return entities.addAll(index, objects);
     }
 
@@ -234,7 +278,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         List<TARGET> entitiesToClear = entities;
         if (entitiesToClear != null) {
             for (TARGET target : entitiesToClear) {
-                entitiesRemoved.put(target, Boolean.TRUE);
+                entitiesRemoved.put(target, TRUE);
             }
             entitiesToClear.clear();
         }
@@ -242,6 +286,11 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         Map setToClear = entitiesAdded;
         if (setToClear != null) {
             setToClear.clear();
+        }
+
+        Map entityCountsToClear = this.entityCounts;
+        if (entityCountsToClear != null) {
+            entityCountsToClear.clear();
         }
     }
 
@@ -280,6 +329,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
     }
 
     @Override
+    @Nonnull
     public Iterator<TARGET> iterator() {
         ensureEntities();
         return entities.iterator();
@@ -292,6 +342,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
     }
 
     @Override
+    @Nonnull
     public ListIterator<TARGET> listIterator() {
         ensureEntities();
         return entities.listIterator();
@@ -302,6 +353,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
      * Thus these removes will NOT be synced to the target Box.
      */
     @Override
+    @Nonnull
     public ListIterator<TARGET> listIterator(int location) {
         ensureEntities();
         return entities.listIterator(location);
@@ -311,8 +363,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
     public synchronized TARGET remove(int location) {
         ensureEntitiesWithTrackingLists();
         TARGET removed = entities.remove(location);
-        entitiesAdded.remove(removed);
-        entitiesRemoved.put(removed, Boolean.TRUE);
+        trackRemove(removed);
         return removed;
     }
 
@@ -321,13 +372,11 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         ensureEntitiesWithTrackingLists();
         boolean removed = entities.remove(object);
         if (removed) {
-            entitiesAdded.remove(object);
-            entitiesRemoved.put((TARGET) object, Boolean.TRUE);
+            trackRemove((TARGET) object);
         }
         return removed;
     }
 
-    @Beta
     /** Removes an object by its entity ID. */
     public synchronized TARGET removeById(long id) {
         ensureEntities();
@@ -342,7 +391,6 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
                 }
                 return candidate;
             }
-
         }
         return null;
     }
@@ -368,13 +416,11 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
                     toRemove = new ArrayList<>();
                 }
                 toRemove.add(target);
-                entitiesAdded.remove(target);
-                entitiesRemoved.put((TARGET) target, Boolean.TRUE);
                 changes = true;
             }
         }
         if (toRemove != null) {
-            entities.removeAll(toRemove);
+            removeAll(toRemove);
         }
         return changes;
     }
@@ -383,10 +429,8 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
     public synchronized TARGET set(int location, TARGET object) {
         ensureEntitiesWithTrackingLists();
         TARGET old = entities.set(location, object);
-        entitiesAdded.remove(old);
-        entitiesAdded.put(object, Boolean.TRUE);
-        entitiesRemoved.remove(object);
-        entitiesRemoved.put(old, Boolean.TRUE);
+        trackRemove(old);
+        trackAdd(object);
         return old;
     }
 
@@ -400,22 +444,22 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
      * The returned sub list does not do any change tracking.
      * Thus any modifications to the sublist won't be synced to the target Box.
      */
+    @Nonnull
     @Override
     public List<TARGET> subList(int start, int end) {
         ensureEntities();
-        for (int i = start; i < end; i++) {
-            get(i);
-        }
         return entities.subList(start, end);
     }
 
     @Override
+    @Nonnull
     public Object[] toArray() {
         ensureEntities();
         return entities.toArray();
     }
 
     @Override
+    @Nonnull
     public <T> T[] toArray(T[] array) {
         ensureEntities();
         return entities.toArray(array);
@@ -429,8 +473,9 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         entities = null;
         entitiesAdded = null;
         entitiesRemoved = null;
-        entitiesToRemove = null;
+        entitiesToRemoveFromDb = null;
         entitiesToPut = null;
+        entityCounts = null;
     }
 
     public boolean isResolved() {
@@ -518,8 +563,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
      */
     @Beta
     public boolean hasA(QueryFilter<TARGET> filter) {
-        ensureEntities();
-        Object[] objects = entities.toArray();
+        Object[] objects = toArray();
         for (Object target : objects) {
             if (filter.keep((TARGET) target)) {
                 return true;
@@ -536,8 +580,7 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
      */
     @Beta
     public boolean hasAll(QueryFilter<TARGET> filter) {
-        ensureEntities();
-        Object[] objects = entities.toArray();
+        Object[] objects = toArray();
         if (objects.length == 0) {
             return false;
         }
@@ -549,8 +592,8 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         return true;
     }
 
-    @Beta
     /** Gets an object by its entity ID. */
+    @Beta
     public TARGET getById(long id) {
         ensureEntities();
         Object[] objects = entities.toArray();
@@ -564,8 +607,8 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
         return null;
     }
 
-    @Beta
     /** Gets the index of the object with the given entity ID. */
+    @Beta
     public int indexOfId(long id) {
         ensureEntities();
         Object[] objects = entities.toArray();
@@ -582,33 +625,60 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
     }
 
     /**
+     * Returns true if there are pending changes for the DB.
+     * Changes will be automatically persisted once the owning entity is put, or an explicit call to
+     * {@link #applyChangesToDb()} is made.
+     */
+    public boolean hasPendingDbChanges() {
+        Map<TARGET, Boolean> setAdded = this.entitiesAdded;
+        if (setAdded != null && !setAdded.isEmpty()) {
+            return true;
+        } else {
+            Map<TARGET, Boolean> setRemoved = this.entitiesRemoved;
+            return setRemoved != null && !setRemoved.isEmpty();
+        }
+    }
+
+    /**
      * For internal use only; do not use in your app.
      * Called after relation source entity is put (so we have its ID).
      * Prepares data for {@link #internalApplyToDb(Cursor, Cursor)}
      */
     @Internal
     public boolean internalCheckApplyToDbRequired() {
-        Map<TARGET, Boolean> setAdded = this.entitiesAdded;
-        Map<TARGET, Boolean> setRemoved = this.entitiesRemoved;
-        if ((setAdded == null || setAdded.isEmpty()) && (setRemoved == null || setRemoved.isEmpty())) {
+        if (!hasPendingDbChanges()) {
             return false;
         }
-        io.objectbox.internal.ToOneGetter backlinkToOneGetter = relationInfo.backlinkToOneGetter;
+
+        synchronized (this) {
+            if (entitiesToPut == null) {
+                entitiesToPut = new ArrayList<>();
+                entitiesToRemoveFromDb = new ArrayList<>();
+            }
+        }
+
+        //noinspection SimplifiableIfStatement
+        if (relationInfo.relationId != 0) {
+            // No preparation for standalone relations needed:
+            // everything is done inside a single synchronized block in internalApplyToDb
+            return true;
+        } else {
+            return prepareBacklinkEntitiesForDb();
+        }
+    }
+
+    private boolean prepareBacklinkEntitiesForDb() {
+        ToOneGetter backlinkToOneGetter = relationInfo.backlinkToOneGetter;
         long entityId = relationInfo.sourceInfo.getIdGetter().getId(entity);
         if (entityId == 0) {
             throw new IllegalStateException("Source entity has no ID (should have been put before)");
         }
         IdGetter<TARGET> idGetter = relationInfo.targetInfo.getIdGetter();
-        boolean isStandaloneRelation = relationInfo.relationId != 0;
+        Map<TARGET, Boolean> setAdded = this.entitiesAdded;
+        Map<TARGET, Boolean> setRemoved = this.entitiesRemoved;
+
         synchronized (this) {
-            if (entitiesToPut == null) {
-                entitiesToPut = new ArrayList<>();
-                entitiesToRemove = new ArrayList<>();
-            }
-            if (isStandaloneRelation) {
-                // No prep here, all is done inside a single synchronized block in internalApplyToDb
-                return !setAdded.isEmpty() || !setRemoved.isEmpty();
-            } else {
+            if (setAdded != null && !setAdded.isEmpty()) {
                 for (TARGET target : setAdded.keySet()) {
                     ToOne<Object> toOne = backlinkToOneGetter.getToOne(target);
                     if (toOne == null) {
@@ -625,22 +695,26 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
                     }
                 }
                 setAdded.clear();
+            }
 
+            if (setRemoved != null) {
                 for (TARGET target : setRemoved.keySet()) {
                     ToOne<Object> toOne = backlinkToOneGetter.getToOne(target);
                     long toOneTargetId = toOne.getTargetId();
                     if (toOneTargetId == entityId) {
-                        toOne.setTarget(null);
-                        if (removeFromTargetBox) {
-                            entitiesToRemove.add(target);
-                        } else {
-                            entitiesToPut.add(target);
+                        toOne.setTarget(null); // This is also done for non-persisted entities (if used elsewhere)
+                        if (idGetter.getId(target) != 0) { // No further action for non-persisted entities required
+                            if (removeFromTargetBox) {
+                                entitiesToRemoveFromDb.add(target);
+                            } else {
+                                entitiesToPut.add(target);
+                            }
                         }
                     }
                 }
                 setRemoved.clear();
-                return !entitiesToPut.isEmpty() || !entitiesToRemove.isEmpty();
             }
+            return !entitiesToPut.isEmpty() || !entitiesToRemoveFromDb.isEmpty();
         }
     }
 
@@ -650,10 +724,10 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
      */
     @Internal
     public void internalApplyToDb(Cursor sourceCursor, Cursor<TARGET> targetCursor) {
-        TARGET[] toRemove;
+        TARGET[] toRemoveFromDb;
         TARGET[] toPut;
         TARGET[] addedStandalone = null;
-        TARGET[] removedStandalone = null;
+        List<TARGET> removedStandalone = null;
 
         boolean isStandaloneRelation = relationInfo.relationId != 0;
         IdGetter<TARGET> targetIdGetter = relationInfo.targetInfo.getIdGetter();
@@ -665,28 +739,30 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
                     }
                 }
                 if (removeFromTargetBox) {
-                    entitiesToRemove.addAll(entitiesRemoved.keySet());
+                    entitiesToRemoveFromDb.addAll(entitiesRemoved.keySet());
                 }
                 if (!entitiesAdded.isEmpty()) {
                     addedStandalone = (TARGET[]) entitiesAdded.keySet().toArray();
                     entitiesAdded.clear();
                 }
                 if (!entitiesRemoved.isEmpty()) {
-                    removedStandalone = (TARGET[]) entitiesRemoved.keySet().toArray();
+                    removedStandalone = new ArrayList<>(entitiesRemoved.keySet());
                     entitiesRemoved.clear();
                 }
             }
 
-            toRemove = entitiesToRemove.isEmpty() ? null : (TARGET[]) entitiesToRemove.toArray();
-            entitiesToRemove.clear();
+            toRemoveFromDb = entitiesToRemoveFromDb.isEmpty() ? null : (TARGET[]) entitiesToRemoveFromDb.toArray();
+            entitiesToRemoveFromDb.clear();
             toPut = entitiesToPut.isEmpty() ? null : (TARGET[]) entitiesToPut.toArray();
             entitiesToPut.clear();
         }
 
-        if (toRemove != null) {
-            for (TARGET target : toRemove) {
+        if (toRemoveFromDb != null) {
+            for (TARGET target : toRemoveFromDb) {
                 long id = targetIdGetter.getId(target);
-                targetCursor.deleteEntity(id);
+                if (id != 0) {
+                    targetCursor.deleteEntity(id);
+                }
             }
         }
         if (toPut != null) {
@@ -701,26 +777,51 @@ public class ToMany<TARGET> implements List<TARGET>, Serializable {
                 throw new IllegalStateException("Source entity has no ID (should have been put before)");
             }
 
-            checkModifyStandaloneRelation(sourceCursor, entityId, removedStandalone, targetIdGetter, true);
-            checkModifyStandaloneRelation(sourceCursor, entityId, addedStandalone, targetIdGetter, false);
+            if (removedStandalone != null) {
+                removeStandaloneRelations(sourceCursor, entityId, removedStandalone, targetIdGetter);
+            }
+            if (addedStandalone != null) {
+                addStandaloneRelations(sourceCursor, entityId, addedStandalone, targetIdGetter, false);
+            }
         }
     }
 
-    private void checkModifyStandaloneRelation(Cursor cursor, long sourceEntityId, TARGET[] targets,
-                                               IdGetter<TARGET> targetIdGetter, boolean remove) {
-        if (targets != null) {
-            int length = targets.length;
-            long[] targetIds = new long[length];
-            for (int i = 0; i < length; i++) {
-                long targetId = targetIdGetter.getId(targets[i]);
-                if (targetId == 0) {
-                    // Paranoia
-                    throw new IllegalStateException("Target entity has no ID (should have been put before)");
-                }
-                targetIds[i] = targetId;
+    /**
+     * The list of removed entities may contain non-persisted entities, which will be ignored (removed from the list).
+     */
+    private void removeStandaloneRelations(Cursor cursor, long sourceEntityId, List<TARGET> removed,
+                                           IdGetter<TARGET> targetIdGetter) {
+        Iterator<TARGET> iterator = removed.iterator();
+        while (iterator.hasNext()) {
+            if (targetIdGetter.getId(iterator.next()) == 0) {
+                iterator.remove();
             }
-            cursor.modifyRelations(relationInfo.relationId, sourceEntityId, targetIds, remove);
         }
+
+        int size = removed.size();
+        if (size > 0) {
+            long[] targetIds = new long[size];
+            for (int i = 0; i < size; i++) {
+                targetIds[i] = targetIdGetter.getId(removed.get(i));
+            }
+            cursor.modifyRelations(relationInfo.relationId, sourceEntityId, targetIds, true);
+        }
+    }
+
+    /** The target array may not contain non-persisted entities. */
+    private void addStandaloneRelations(Cursor cursor, long sourceEntityId, @Nullable TARGET[] added,
+                                        IdGetter<TARGET> targetIdGetter, boolean remove) {
+        int length = added.length;
+        long[] targetIds = new long[length];
+        for (int i = 0; i < length; i++) {
+            long targetId = targetIdGetter.getId(added[i]);
+            if (targetId == 0) {
+                // Paranoia
+                throw new IllegalStateException("Target entity has no ID (should have been put before)");
+            }
+            targetIds[i] = targetId;
+        }
+        cursor.modifyRelations(relationInfo.relationId, sourceEntityId, targetIds, remove);
     }
 
     /** For tests */

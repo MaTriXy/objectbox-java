@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2018 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,16 +14,18 @@
  * limitations under the License.
  */
 
-package io.objectbox.reactive;
+package io.objectbox.exception;
 
 /**
- * The result of subscribing an @{@link DataObserver} using @{@link SubscriptionBuilder#observer(DataObserver)}.
- * Used to cancel the subscription (unsubscribe).
+ * Listener for exceptions occurring during database operations.
+ * Set via {@link io.objectbox.BoxStore#setDbExceptionListener(DbExceptionListener)}.
  */
-public interface DataSubscription {
-    /** The Observer shall not receive anymore updates. */
-    void cancel();
-
-    /** Current cancellation state of the subscription. */
-    boolean isCanceled();
+public interface DbExceptionListener {
+    /**
+     * Called when an exception is thrown during a database operation.
+     * Do NOT throw exceptions in this method: throw exceptions are ignored (but logged to stderr).
+     *
+     * @param e the exception occurred during a database operation
+     */
+    void onDbException(Exception e);
 }

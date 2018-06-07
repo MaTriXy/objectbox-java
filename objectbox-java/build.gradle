@@ -19,7 +19,7 @@ dependencies {
     compile fileTree(include: ['*.jar'], dir: 'libs')
     compile project(':objectbox-java-api')
     compile 'org.greenrobot:essentials:3.0.0-RC1'
-    compile 'com.google.flatbuffers:flatbuffers-java:1.7.2'
+    compile 'com.google.flatbuffers:flatbuffers-java:1.8.0'
     compile 'com.google.code.findbugs:jsr305:3.0.2'
 }
 
@@ -82,5 +82,25 @@ uploadArchives {
                 }
             }
         }
+    }
+}
+
+// this task is also used by the composite build ('objectbox-deploy'), check before making changes
+task verifyVersion {
+    group 'verify'
+    doLast {
+        // verify version in Boxstore.java
+        File storeFile = file('src/main/java/io/objectbox/BoxStore.java')
+        def versionLine = storeFile.filterLine { line ->
+            line.contains("String VERSION =")
+        }.toString()
+
+        if (versionLine == null || versionLine.empty) {
+            throw new GradleException('Could not find VERSION in ObjectStore.cpp')
+        }
+
+        // matches snippet like '12.34.56'
+        def boxStoreVersion = versionLine.find("\\d+\\.\\d+\\.\\d+")
+        assert ob_expected_version == boxStoreVersion
     }
 }

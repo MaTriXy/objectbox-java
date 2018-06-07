@@ -1,11 +1,16 @@
 // Just too many sub projects, so each can reference rootProject.version
-version = '1.3.4'
+version = '1.5.0'
 
 buildscript {
+    ext.ob_expected_version = project.hasProperty('expectedVersion') ? project.property('expectedVersion') : 'UNDEFINED'
     ext {
         isLinux = System.getProperty("os.name").contains("Linux")
+        isMac = !isLinux && System.getProperty("os.name").toLowerCase().contains("mac")
+        isWin = System.getProperty("os.name").toLowerCase().contains("windows")
         is64 = System.getProperty("sun.arch.data.model") == "64"
         isLinux64 = isLinux && is64
+        isMac64 = isMac && is64
+        isWin64 = isWin && is64
     }
 
     repositories {
@@ -125,7 +130,36 @@ configure(subprojects.findAll { projectNamesToPublish.contains(it.name) }) {
     }
 }
 
+// this task is also used by the composite build ('objectbox-deploy'), check before making changes
+task installAll {
+    group 'deploy'
+    dependsOn ':objectbox-java-api:install'
+    dependsOn ':objectbox-java:install'
+    dependsOn ':objectbox-kotlin:install'
+    doLast {
+        println("Installed version $version")
+    }
+}
+
+// this task is also used by the composite build ('objectbox-deploy'), check before making changes
+task deployAll {
+    group 'deploy'
+    dependsOn ':objectbox-java-api:uploadArchives'
+    dependsOn ':objectbox-java:uploadArchives'
+    dependsOn ':objectbox-kotlin:uploadArchives'
+}
+
+// this task is also used by the composite build ('objectbox-deploy'), check before making changes
+task verifyVersion {
+    group 'verify'
+    dependsOn ':objectbox-java:verifyVersion'
+    doLast {
+        assert ob_expected_version == version
+    }
+}
+
 task wrapper(type: Wrapper) {
-    gradleVersion = '4.3'
-    distributionType = org.gradle.api.tasks.wrapper.Wrapper.DistributionType.ALL
+    group 'build setup'
+    gradleVersion = '4.5.1'
+    distributionType = Wrapper.DistributionType.ALL
 }

@@ -14,8 +14,15 @@
  * limitations under the License.
  */
 
-package io.objectbox.query;
+package io.objectbox;
 
-public interface QueryConsumer<T> {
-    void accept(T data);
+import io.objectbox.annotation.apihint.Experimental;
+
+
+@Experimental
+/**
+ * Generic Factory that provides a resource on demand (if and when it is required).
+ */
+public interface Factory<T> {
+    T provide() throws Exception;
 }
