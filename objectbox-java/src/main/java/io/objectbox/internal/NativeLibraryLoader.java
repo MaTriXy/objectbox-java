@@ -25,23 +25,39 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
 import java.net.URL;
 import java.net.URLConnection;
+
+import io.objectbox.BoxStore;
 
 /**
  * Separate class, so we can mock BoxStore.
  */
 public class NativeLibraryLoader {
+
+    private static final String OBJECTBOX_JNI = "objectbox-jni";
+
     static {
-        String libname = "objectbox";
-        String filename = "objectbox.so";
+        String libname = OBJECTBOX_JNI;
+        String filename = libname + ".so";
+
+        final String vendor = System.getProperty("java.vendor");
+        final String osName = System.getProperty("os.name").toLowerCase();
+
+        // Some Android devices are detected as neither Android or Linux below,
+        // so assume Linux by default to always fallback to Android
+        boolean isLinux = true;
         // For Android, os.name is also "Linux", so we need an extra check
-        boolean android = System.getProperty("java.vendor").contains("Android");
+        // Is not completely reliable (e.g. Vivo devices), see workaround on load failure
+        // Note: can not use check for Android classes as testing frameworks (Robolectric)
+        // may provide them on non-Android devices
+        final boolean android = vendor.contains("Android");
         if (!android) {
-            String osName = System.getProperty("os.name").toLowerCase();
-            String sunArch = System.getProperty("sun.arch.data.model");
-            String cpuArchPostfix = "32".equals(sunArch) ? "-x86" : "-x64";
+            String cpuArchPostfix = "-" + getCpuArch();
             if (osName.contains("windows")) {
+                isLinux = false;
                 libname += "-windows" + cpuArchPostfix;
                 filename = libname + ".dll";
                 checkUnpackLib(filename);
@@ -50,20 +66,85 @@ public class NativeLibraryLoader {
                 filename = "lib" + libname + ".so";
                 checkUnpackLib(filename);
             } else if (osName.contains("mac")) {
+                isLinux = false;
                 libname += "-macos" + cpuArchPostfix;
                 filename = "lib" + libname + ".dylib";
                 checkUnpackLib(filename);
             }
         }
-        File file = new File(filename);
-        if (file.exists()) {
-            System.load(file.getAbsolutePath());
-        } else {
-            if (!android) {
-                System.err.println("File not available: " + file.getAbsolutePath());
+        try {
+            File file = new File(filename);
+            if (file.exists()) {
+                System.load(file.getAbsolutePath());
+            } else {
+                try {
+                    if (android) {
+                        boolean success = loadLibraryAndroid();
+                        if (!success) {
+                            System.loadLibrary(libname);
+                        }
+                    } else {
+                        System.err.println("File not available: " + file.getAbsolutePath());
+                        System.loadLibrary(libname);
+                    }
+                } catch (UnsatisfiedLinkError e) {
+                    if (!android && isLinux) {
+                        // maybe is Android, but check failed: try loading Android lib
+                        boolean success = loadLibraryAndroid();
+                        if (!success) {
+                            System.loadLibrary(OBJECTBOX_JNI);
+                        }
+                    } else {
+                        throw e;
+                    }
+                }
             }
-            System.loadLibrary(libname);
+        } catch (UnsatisfiedLinkError e) {
+            String osArch = System.getProperty("os.arch");
+            String sunArch = System.getProperty("sun.arch.data.model");
+            String message = String.format(
+                    "Loading ObjectBox native library failed: vendor=%s,os=%s,os.arch=%s,sun.arch=%s,android=%s,linux=%s",
+                    vendor, osName, osArch, sunArch, android, isLinux
+            );
+            throw new LinkageError(message, e); // UnsatisfiedLinkError does not allow a cause; use its super class
         }
+    }
+
+    private static String getCpuArch() {
+        String osArch = System.getProperty("os.arch");
+        String cpuArch = null;
+        if (osArch != null) {
+            osArch = osArch.toLowerCase();
+            if (osArch.equalsIgnoreCase("amd64") || osArch.equalsIgnoreCase("x86_64")) {
+                cpuArch = "x64";
+            } else if (osArch.equalsIgnoreCase("x86")) {
+                cpuArch = "x86";
+            } else if (osArch.startsWith("arm")) {
+                switch (osArch) {
+                    case "armv7":
+                    case "armv7l":
+                    case "armeabi-v7a": // os.arch "armeabi-v7a" might be Android only, but let's try anyway...
+                        cpuArch = "armv7";
+                        break;
+                    case "arm64-v8a":
+                        cpuArch = "arm64";
+                        break;
+                    case "armv6":
+                        cpuArch = "armv6";
+                        break;
+                    default:
+                        cpuArch = "armv6";  // Lowest version we support
+                        System.err.println("Unknown os.arch \"" + osArch + "\" - ObjectBox is defaulting to " + cpuArch);
+                        break;
+                }
+            }
+        }
+        if (cpuArch == null) {
+            String sunArch = System.getProperty("sun.arch.data.model");
+            cpuArch = "32".equals(sunArch) ? "x86" : "x64";
+            System.err.println("Unknown os.arch \"" + osArch + "\" - ObjectBox is defaulting to " + cpuArch);
+        }
+        return cpuArch;
     }
 
     private static void checkUnpackLib(String filename) {
@@ -97,6 +178,39 @@ public class NativeLibraryLoader {
                 e.printStackTrace();
             }
         }
+    }
+
+    private static boolean loadLibraryAndroid() {
+        if (BoxStore.getContext() == null) {
+            return false;
+        }
+
+        //noinspection TryWithIdenticalCatches
+        try {
+            Class<?> context = Class.forName("android.content.Context");
+            if (BoxStore.getRelinker() == null) {
+                // use default ReLinker
+                Class<?> relinker = Class.forName("com.getkeepsafe.relinker.ReLinker");
+                Method loadLibrary = relinker.getMethod("loadLibrary", context, String.class, String.class);
+                loadLibrary.invoke(null, BoxStore.getContext(), OBJECTBOX_JNI, BoxStore.JNI_VERSION);
+            } else {
+                // use custom ReLinkerInstance
+                Method loadLibrary = BoxStore.getRelinker().getClass().getMethod("loadLibrary", context, String.class, String.class);
+                loadLibrary.invoke(BoxStore.getRelinker(), BoxStore.getContext(), OBJECTBOX_JNI, BoxStore.JNI_VERSION);
+            }
+        } catch (NoSuchMethodException e) {
+            return false;
+        } catch (IllegalAccessException e) {
+            return false;
+        } catch (InvocationTargetException e) {
+            return false;
+        } catch (ClassNotFoundException e) {
+            return false;
+        }
+        // note: do not catch Exception as it will swallow ReLinker exceptions useful for debugging
+        // note: can't catch ReflectiveOperationException, is K+ (19+) on Android
+
+        return true;
     }
 
     public static void ensureLoaded() {

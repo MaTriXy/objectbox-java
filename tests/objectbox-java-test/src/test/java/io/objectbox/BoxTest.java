@@ -56,10 +56,10 @@ public class BoxTest extends AbstractObjectBoxTest {
         entity.setSimpleLong(54321);
         String value1 = "lulu321";
         entity.setSimpleString(value1);
-        long key = box.put(entity);
+        long id = box.put(entity);
 
         // get it
-        TestEntity entityRead = box.get(key);
+        TestEntity entityRead = box.get(id);
         assertNotNull(entityRead);
         assertEquals(1977, entityRead.getSimpleInt());
         assertEquals(54321, entityRead.getSimpleLong());
@@ -72,15 +72,16 @@ public class BoxTest extends AbstractObjectBoxTest {
         box.put(entityRead);
 
         // get the changed entity
-        entityRead = box.get(key);
+        entityRead = box.get(id);
         assertNotNull(entityRead);
         assertEquals(1977, entityRead.getSimpleInt());
         assertEquals(12345, entityRead.getSimpleLong());
         assertEquals(value2, entityRead.getSimpleString());
 
         // and remove it
-        box.remove(key);
-        assertNull(box.get(key));
+        assertTrue(box.remove(id));
+        assertNull(box.get(id));
+        assertFalse(box.remove(id));
     }
 
     @Test
@@ -103,6 +104,25 @@ public class BoxTest extends AbstractObjectBoxTest {
     }
 
     @Test
+    public void testPutBatched() {
+        List<TestEntity> entities = new ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            TestEntity entity = new TestEntity();
+            entity.setSimpleInt(2000 + i);
+            entities.add(entity);
+        }
+        box.putBatched(entities, 4);
+        assertEquals(entities.size(), box.count());
+
+        List<TestEntity> entitiesRead = box.getAll();
+        assertEquals(entities.size(), entitiesRead.size());
+
+        for (int i = 0; i < entities.size(); i++) {
+            assertEquals(2000 + i, entitiesRead.get(i).getSimpleInt());
+        }
+    }
+
+    @Test
     public void testRemoveMany() {
         List<TestEntity> entities = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
@@ -113,7 +133,8 @@ public class BoxTest extends AbstractObjectBoxTest {
         box.put(entities);
         assertEquals(entities.size(), box.count());
 
-        box.remove(entities.get(1));
+        assertTrue(box.remove(entities.get(1)));
+        assertFalse(box.remove(entities.get(1)));
         assertEquals(entities.size() - 1, box.count());
         box.remove(entities.get(4), entities.get(5));
         assertEquals(entities.size() - 3, box.count());
@@ -136,6 +157,31 @@ public class BoxTest extends AbstractObjectBoxTest {
         assertEquals(0, box.count());
     }
 
+    // https://github.com/objectbox/objectbox-java/issues/626
+    @Test
+    public void testGetAllAfterGetAndRemove() {
+        assertEquals(0, box.count());
+        assertEquals(0, box.getAll().size());
+
+        System.out.println("PUT");
+        List<TestEntity> entities = putTestEntities(10);
+
+        // explicitly get an entity (any will do)
+        System.out.println("GET");
+        TestEntity entity = box.get(entities.get(1).getId());
+        assertNotNull(entity);
+
+        System.out.println("REMOVE_ALL");
+        box.removeAll();
+
+        System.out.println("COUNT");
+        assertEquals(0, box.count());
+        System.out.println("GET_ALL");
+        List<TestEntity> all = box.getAll();
+        // note only 1 entity is returned by getAll, it is the one we explicitly get (last) above
+        assertEquals(0, all.size());
+    }
+
     @Test
     public void testPanicModeRemoveAllObjects() {
         assertEquals(0, box.panicModeRemoveAll());
@@ -147,14 +193,11 @@ public class BoxTest extends AbstractObjectBoxTest {
     @Test
     public void testRunInTx() {
         final long[] counts = {0, 0};
-        store.runInTx(new Runnable() {
-            @Override
-            public void run() {
-                box.put(new TestEntity());
-                counts[0] = box.count();
-                box.put(new TestEntity());
-                counts[1] = box.count();
-            }
+        store.runInTx(() -> {
+            box.put(new TestEntity());
+            counts[0] = box.count();
+            box.put(new TestEntity());
+            counts[1] = box.count();
         });
         assertEquals(1, counts[0]);
         assertEquals(2, counts[1]);
@@ -213,35 +256,11 @@ public class BoxTest extends AbstractObjectBoxTest {
 
     @Test
     public void testCollectionsNull() {
-        box.put((Collection) null);
+        box.put((Collection<TestEntity>) null);
         box.put((TestEntity[]) null);
-        box.remove((Collection) null);
+        box.remove((Collection<TestEntity>) null);
         box.remove((long[]) null);
-        box.removeByKeys(null);
-    }
-
-    @Test
-    public void testFindString() {
-        putTestEntity("banana", 0);
-        putTestEntity("apple", 0);
-        putTestEntity("banana", 0);
-
-        List<TestEntity> list = box.find(TestEntity_.simpleString, "banana");
-        assertEquals(2, list.size());
-        assertEquals(1, list.get(0).getId());
-        assertEquals(3, list.get(1).getId());
-    }
-
-    @Test
-    public void testFindInt() {
-        putTestEntity(null, 42);
-        putTestEntity(null, 23);
-        putTestEntity(null, 42);
-
-        List<TestEntity> list = box.find(TestEntity_.simpleInt, 42);
-        assertEquals(2, list.size());
-        assertEquals(1, list.get(0).getId());
-        assertEquals(3, list.get(1).getId());
+        box.removeByIds(null);
     }
 
     @Test
@@ -249,6 +268,22 @@ public class BoxTest extends AbstractObjectBoxTest {
         TestEntity entity = putTestEntity(null, 42);
         assertTrue(entity.getId() > 0);
         assertEquals(entity.getId(), box.getId(entity));
+    }
+
+    @Test
+    public void testCountMaxAndIsEmpty() {
+        assertTrue(box.isEmpty());
+        putTestEntity("banana", 0);
+        assertFalse(box.isEmpty());
+
+        assertEquals(1, box.count(1));
+        assertEquals(1, box.count(2));
+        putTestEntity("apple", 0);
+        assertEquals(2, box.count(2));
+        assertEquals(2, box.count(3));
+
+        box.removeAll();
+        assertTrue(box.isEmpty());
     }
 
 }

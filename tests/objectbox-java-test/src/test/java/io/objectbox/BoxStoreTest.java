@@ -140,6 +140,32 @@ public class BoxStoreTest extends AbstractObjectBoxTest {
         assertTrue(basedir.delete());
     }
 
+    @Test(expected = IllegalStateException.class)
+    public void testDeleteAllFiles_openStore() {
+        BoxStore.deleteAllFiles(boxStoreDir);
+    }
+
+    @Test
+    public void removeAllObjects() {
+        // Insert at least two different kinds.
+        store.close();
+        store.deleteAllFiles();
+        store = createBoxStoreBuilderWithTwoEntities(false).build();
+        putTestEntities(5);
+        Box<TestEntityMinimal> minimalBox = store.boxFor(TestEntityMinimal.class);
+        minimalBox.put(new TestEntityMinimal(0, "Sally"));
+        assertEquals(5, getTestEntityBox().count());
+        assertEquals(1, minimalBox.count());
+
+        store.removeAllObjects();
+        assertEquals(0, getTestEntityBox().count());
+        assertEquals(0, minimalBox.count());
+
+        // Assert inserting is still possible.
+        putTestEntities(1);
+        assertEquals(1, getTestEntityBox().count());
+    }
+
     private void closeStoreForTest() {
         assertTrue(boxStoreDir.exists());
         store.close();
@@ -168,12 +194,9 @@ public class BoxStoreTest extends AbstractObjectBoxTest {
         final int[] countHolderCallback = {0};
 
         BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(false)).directory(boxStoreDir)
-                .failedReadTxAttemptCallback(new TxCallback() {
-                    @Override
-                    public void txFinished(@Nullable Object result, @Nullable Throwable error) {
-                        assertNotNull(error);
-                        countHolderCallback[0]++;
-                    }
+                .failedReadTxAttemptCallback((result, error) -> {
+                    assertNotNull(error);
+                    countHolderCallback[0]++;
                 });
         store = builder.build();
         String value = store.callInReadTxWithRetry(createTestCallable(countHolder), 5, 0, true);
@@ -183,15 +206,12 @@ public class BoxStoreTest extends AbstractObjectBoxTest {
     }
 
     private Callable<String> createTestCallable(final int[] countHolder) {
-        return new Callable<String>() {
-            @Override
-            public String call() throws Exception {
-                int count = ++countHolder[0];
-                if (count < 5) {
-                    throw new DbException("Count: " + count);
-                }
-                return "42";
+        return () -> {
+            int count = ++countHolder[0];
+            if (count < 5) {
+                throw new DbException("Count: " + count);
             }
+            return "42";
         };
     }
 

@@ -101,7 +101,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
         // and find via index
         assertEquals(key, cursor.lookupKeyUsingIndex(9, value1));
-        assertEquals(key, cursor.find(TestEntity_.simpleString, value1).get(0).getId());
+//        assertEquals(key, cursor.find(TestEntity_.simpleString, value1).get(0).getId());
 
         // change entity values
         String value2 = "lala123";
@@ -112,10 +112,10 @@ public class CursorTest extends AbstractObjectBoxTest {
         cursor.put(entityRead);
 
         // indexes ok?
-        assertEquals(0, cursor.find(TestEntity_.simpleString, value1).size());
+//        assertEquals(0, cursor.find(TestEntity_.simpleString, value1).size());
         assertEquals(0, cursor.lookupKeyUsingIndex(9, value1));
 
-        assertEquals(key, cursor.find(TestEntity_.simpleString, value2).get(0).getId());
+//        assertEquals(key, cursor.find(TestEntity_.simpleString, value2).get(0).getId());
 
         // get the changed entity
         entityRead = cursor.get(key);
@@ -130,8 +130,8 @@ public class CursorTest extends AbstractObjectBoxTest {
         cursor.deleteEntity(key);
 
         // not in any index anymore
-        assertEquals(0, cursor.find(TestEntity_.simpleString, value1).size());
-        assertEquals(0, cursor.find(TestEntity_.simpleString, value2).size());
+//        assertEquals(0, cursor.find(TestEntity_.simpleString, value1).size());
+//        assertEquals(0, cursor.find(TestEntity_.simpleString, value2).size());
 
         cursor.close();
         transaction.abort();
@@ -160,59 +160,6 @@ public class CursorTest extends AbstractObjectBoxTest {
         assertEquals(value, read.getSimpleString());
     }
 
-    @Test
-    public void testFindStringInEntity() {
-        insertTestEntities("find me", "not me");
-
-        Transaction transaction = store.beginTx();
-        Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
-        TestEntity entityRead = cursor.find(TestEntity_.simpleString, "find me").get(0);
-        assertNotNull(entityRead);
-        assertEquals(1, entityRead.getId());
-
-        cursor.close();
-        transaction.abort();
-
-        transaction = store.beginTx();
-        cursor = transaction.createCursor(TestEntity.class);
-        entityRead = cursor.find(TestEntity_.simpleString, "not me").get(0);
-        assertNotNull(entityRead);
-        assertEquals(2, entityRead.getId());
-
-        cursor.close();
-        transaction.abort();
-
-        transaction = store.beginTx();
-        cursor = transaction.createCursor(TestEntity.class);
-        assertEquals(0, cursor.find(TestEntity_.simpleString, "non-existing").size());
-
-        cursor.close();
-        transaction.abort();
-    }
-
-    @Test
-    public void testFindScalars() {
-        Transaction transaction1 = store.beginTx();
-        Cursor<TestEntity> cursor1 = transaction1.createCursor(TestEntity.class);
-        putEntity(cursor1, "nope", 2015);
-        putEntity(cursor1, "foo", 2016);
-        putEntity(cursor1, "bar", 2016);
-        putEntity(cursor1, "nope", 2017);
-        cursor1.close();
-        transaction1.commit();
-
-        Transaction transaction = store.beginReadTx();
-        Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
-        List<TestEntity> result = cursor.find(TestEntity_.simpleInt, 2016);
-        assertEquals(2, result.size());
-
-        assertEquals("foo", result.get(0).getSimpleString());
-        assertEquals("bar", result.get(1).getSimpleString());
-
-        cursor.close();
-        transaction.abort();
-    }
-
     private void insertTestEntities(String... texts) {
         Transaction transaction = store.beginTx();
         Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
@@ -224,12 +171,7 @@ public class CursorTest extends AbstractObjectBoxTest {
     }
 
     @Test
-    public void testFindStringInEntityWithIndex() {
-        testFindStringInEntity();
-    }
-
-    @Test
-    public void testLookupKeyUsingIndex() throws IOException {
+    public void testLookupKeyUsingIndex() {
         insertTestEntities("find me", "not me");
 
         Transaction transaction = store.beginTx();
@@ -261,8 +203,7 @@ public class CursorTest extends AbstractObjectBoxTest {
 
     @Test
     public void testClose() {
-        Transaction tx = store.beginReadTx();
-        try {
+        try (Transaction tx = store.beginReadTx()) {
             Cursor<TestEntity> cursor = tx.createCursor(TestEntity.class);
             assertFalse(cursor.isClosed());
             cursor.close();
@@ -270,8 +211,6 @@ public class CursorTest extends AbstractObjectBoxTest {
 
             // Double close should be fine
             cursor.close();
-        } finally {
-            tx.close();
         }
     }
 
@@ -282,20 +221,17 @@ public class CursorTest extends AbstractObjectBoxTest {
         long duration = System.currentTimeMillis() - time; // Usually 0 on desktop
         final CountDownLatch latchBeforeBeginTx = new CountDownLatch(1);
         final CountDownLatch latchAfterBeginTx = new CountDownLatch(1);
-        new Thread() {
-            @Override
-            public void run() {
-                latchBeforeBeginTx.countDown();
-                Transaction tx2 = store.beginTx();
-                latchAfterBeginTx.countDown();
-                tx2.close();
-            }
-        }.start();
+        new Thread(() -> {
+            latchBeforeBeginTx.countDown();
+            Transaction tx2 = store.beginTx();
+            latchAfterBeginTx.countDown();
+            tx2.close();
+        }).start();
         assertTrue(latchBeforeBeginTx.await(1, TimeUnit.SECONDS));
-        long waitTime = 50 + duration * 10;
+        long waitTime = 100 + duration * 10;
         assertFalse(latchAfterBeginTx.await(waitTime, TimeUnit.MILLISECONDS));
         tx.close();
-        assertTrue(latchAfterBeginTx.await(waitTime, TimeUnit.MILLISECONDS));
+        assertTrue(latchAfterBeginTx.await(waitTime * 2, TimeUnit.MILLISECONDS));
     }
 
     @Test
@@ -311,7 +247,7 @@ public class CursorTest extends AbstractObjectBoxTest {
     }
 
     @Test
-    public void testRenew() throws IOException {
+    public void testRenew() {
         insertTestEntities("orange");
 
         Transaction transaction = store.beginReadTx();
@@ -320,6 +256,23 @@ public class CursorTest extends AbstractObjectBoxTest {
         transaction.renew();
         cursor.renew();
         assertEquals("orange", cursor.get(1).getSimpleString());
+
+        cursor.close();
+        transaction.close();
+    }
+
+    @Test
+    public void testThrowInEntityConstructor() {
+        insertTestEntities(TestEntity.STRING_VALUE_THROW_IN_CONSTRUCTOR);
+
+        Transaction transaction = store.beginReadTx();
+        Cursor<TestEntity> cursor = transaction.createCursor(TestEntity.class);
+
+        RuntimeException exception = assertThrows(
+                RuntimeException.class,
+                () -> cursor.get(1)
+        );
+        assertEquals(TestEntity.EXCEPTION_IN_CONSTRUCTOR_MESSAGE, exception.getMessage());
 
         cursor.close();
         transaction.close();

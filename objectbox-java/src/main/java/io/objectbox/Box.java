@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2019 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ package io.objectbox;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -31,12 +31,12 @@ import javax.annotation.concurrent.ThreadSafe;
 import io.objectbox.annotation.apihint.Beta;
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
-import io.objectbox.annotation.apihint.Temporary;
 import io.objectbox.exception.DbException;
 import io.objectbox.internal.CallWithHandle;
 import io.objectbox.internal.IdGetter;
 import io.objectbox.internal.ReflectionCache;
 import io.objectbox.query.QueryBuilder;
+import io.objectbox.relation.RelationInfo;
 
 /**
  * A box to store objects of a particular class.
@@ -45,6 +45,7 @@ import io.objectbox.query.QueryBuilder;
  */
 @Beta
 @ThreadSafe
+@SuppressWarnings("WeakerAccess,UnusedReturnValue,unused")
 public class Box<T> {
     private final BoxStore store;
     private final Class<T> entityClass;
@@ -55,7 +56,7 @@ public class Box<T> {
 
     private final IdGetter<T> idGetter;
 
-    private EntityInfo entityInfo;
+    private EntityInfo<T> entityInfo;
     private volatile Field boxStoreField;
 
     Box(BoxStore store, Class<T> entityClass) {
@@ -157,6 +158,7 @@ public class Box<T> {
         Cursor<T> cursor = threadLocalReader.get();
         if (cursor != null) {
             cursor.close();
+            cursor.getTx().close(); // a read TX is always started when the threadLocalReader is set
             threadLocalReader.remove();
         }
     }
@@ -293,61 +295,25 @@ public class Box<T> {
         }
     }
 
-    @Temporary
-    public List<T> find(Property property, String value) {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.find(property, value);
-        } finally {
-            releaseReader(reader);
-        }
-    }
-
-    @Temporary
-    public List<T> find(Property property, long value) {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.find(property, value);
-        } finally {
-            releaseReader(reader);
-        }
+    /** Returns true if no objects are in this box. */
+    public boolean isEmpty() {
+        return count(1) == 0;
     }
 
     /**
      * Returns all stored Objects in this Box.
+     * @return since 2.4 the returned list is always mutable (before an empty result list was immutable)
      */
     public List<T> getAll() {
+        ArrayList<T> list = new ArrayList<>();
         Cursor<T> cursor = getReader();
         try {
-            T first = cursor.first();
-            if (first == null) {
-                return Collections.emptyList();
-            } else {
-                ArrayList<T> list = new ArrayList<>();
-                list.add(first);
-                while (true) {
-                    T next = cursor.next();
-                    if (next != null) {
-                        list.add(next);
-                    } else {
-                        break;
-                    }
-                }
-                return list;
+            for (T object = cursor.first(); object != null; object = cursor.next()) {
+                list.add(object);
             }
+            return list;
         } finally {
             releaseReader(cursor);
-        }
-    }
-
-    /** Does not work yet, also probably won't be faster than {@link Box#getAll()}. */
-    @Temporary
-    public List<T> getAll2() {
-        Cursor<T> reader = getReader();
-        try {
-            return reader.getAll();
-        } finally {
-            releaseReader(reader);
         }
     }
 
@@ -373,7 +339,8 @@ public class Box<T> {
     /**
      * Puts the given entities in a box using a single transaction.
      */
-    public void put(@Nullable T... entities) {
+    @SafeVarargs // Not using T... as Object[], no ClassCastException expected.
+    public final void put(@Nullable T... entities) {
         if (entities == null || entities.length == 0) {
             return;
         }
@@ -412,22 +379,55 @@ public class Box<T> {
     }
 
     /**
-     * Removes (deletes) the Object by its ID.
+     * Puts the given entities in a box in batches using a separate transaction for each batch.
+     *
+     * @param entities  It is fine to pass null or an empty collection:
+     *                  this case is handled efficiently without overhead.
+     * @param batchSize Number of entities that will be put in one transaction. Must be 1 or greater.
      */
-    public void remove(long id) {
+    public void putBatched(@Nullable Collection<T> entities, int batchSize) {
+        if (batchSize < 1) {
+            throw new IllegalArgumentException("Batch size must be 1 or greater but was " + batchSize);
+        }
+        if (entities == null) {
+            return;
+        }
+
+        Iterator<T> iterator = entities.iterator();
+        while (iterator.hasNext()) {
+            Cursor<T> cursor = getWriter();
+            try {
+                int number = 0;
+                while (number++ < batchSize && iterator.hasNext()) {
+                    cursor.put(iterator.next());
+                }
+                commitWriter(cursor);
+            } finally {
+                releaseWriter(cursor);
+            }
+        }
+    }
+
+    /**
+     * Removes (deletes) the Object by its ID.
+     * @return true if an entity was actually removed (false if no entity exists with the given ID)
+     */
+    public boolean remove(long id) {
         Cursor<T> cursor = getWriter();
+        boolean removed;
         try {
-            cursor.deleteEntity(id);
+            removed = cursor.deleteEntity(id);
             commitWriter(cursor);
         } finally {
             releaseWriter(cursor);
         }
+        return removed;
     }
 
     /**
      * Removes (deletes) Objects by their ID in a single transaction.
      */
-    public void remove(long... ids) {
+    public void remove(@Nullable long... ids) {
         if (ids == null || ids.length == 0) {
             return;
         }
@@ -444,9 +444,17 @@ public class Box<T> {
     }
 
     /**
+     * @deprecated use {@link #removeByIds(Collection)} instead.
+     */
+    @Deprecated
+    public void removeByKeys(@Nullable Collection<Long> ids) {
+        removeByIds(ids);
+    }
+
+    /**
      * Due to type erasure collision, we cannot simply use "remove" as a method name here.
      */
-    public void removeByKeys(@Nullable Collection<Long> ids) {
+    public void removeByIds(@Nullable Collection<Long> ids) {
         if (ids == null || ids.isEmpty()) {
             return;
         }
@@ -463,23 +471,27 @@ public class Box<T> {
 
     /**
      * Removes (deletes) the given Object.
+     * @return true if an entity was actually removed (false if no entity exists with the given ID)
      */
-    public void remove(T object) {
+    public boolean remove(T object) {
         Cursor<T> cursor = getWriter();
+        boolean removed;
         try {
-            long key = cursor.getId(object);
-            cursor.deleteEntity(key);
+            long id = cursor.getId(object);
+            removed = cursor.deleteEntity(id);
             commitWriter(cursor);
         } finally {
             releaseWriter(cursor);
         }
+        return removed;
     }
 
     /**
      * Removes (deletes) the given Objects in a single transaction.
      */
+    @SafeVarargs // Not using T... as Object[], no ClassCastException expected.
     @SuppressWarnings("Duplicates") // Detected duplicate has different type
-    public void remove(@Nullable T... objects) {
+    public final void remove(@Nullable T... objects) {
         if (objects == null || objects.length == 0) {
             return;
         }
@@ -550,7 +562,7 @@ public class Box<T> {
         return store;
     }
 
-    public synchronized EntityInfo getEntityInfo() {
+    public synchronized EntityInfo<T> getEntityInfo() {
         if (entityInfo == null) {
             Cursor<T> reader = getReader();
             try {
@@ -580,11 +592,6 @@ public class Box<T> {
     }
 
     // Sketching future API extension
-    private boolean isEmpty() {
-        return false;
-    }
-
-    // Sketching future API extension
     private boolean isChanged(T entity) {
         return false;
     }
@@ -599,7 +606,7 @@ public class Box<T> {
     }
 
     @Internal
-    public List<T> internalGetBacklinkEntities(int entityId, Property relationIdProperty, long key) {
+    public List<T> internalGetBacklinkEntities(int entityId, Property<?> relationIdProperty, long key) {
         Cursor<T> reader = getReader();
         try {
             return reader.getBacklinkEntities(entityId, relationIdProperty, key);
@@ -609,13 +616,53 @@ public class Box<T> {
     }
 
     @Internal
-    public List<T> internalGetRelationEntities(int sourceEntityId, int relationId, long key) {
+    public List<T> internalGetRelationEntities(int sourceEntityId, int relationId, long key, boolean backlink) {
         Cursor<T> reader = getReader();
         try {
-            return reader.getRelationEntities(sourceEntityId, relationId, key);
+            return reader.getRelationEntities(sourceEntityId, relationId, key, backlink);
         } finally {
             releaseReader(reader);
         }
+    }
+
+    @Internal
+    public long[] internalGetRelationIds(int sourceEntityId, int relationId, long key, boolean backlink) {
+        Cursor<T> reader = getReader();
+        try {
+            return reader.getRelationIds(sourceEntityId, relationId, key, backlink);
+        } finally {
+            releaseReader(reader);
+        }
+    }
+
+    /**
+     * Given a ToMany relation and the ID of a source entity gets the target entities of the relation from their box,
+     * for example {@code orderBox.getRelationEntities(Customer_.orders, customer.getId())}.
+     */
+    public List<T> getRelationEntities(RelationInfo<?, T> relationInfo, long id) {
+        return internalGetRelationEntities(relationInfo.sourceInfo.getEntityId(), relationInfo.relationId, id, false);
+    }
+
+    /**
+     * Given a ToMany relation and the ID of a target entity gets all source entities pointing to this target entity,
+     * for example {@code customerBox.getRelationEntities(Customer_.orders, order.getId())}.
+     */
+    public List<T> getRelationBacklinkEntities(RelationInfo<T, ?> relationInfo, long id) {
+        return internalGetRelationEntities(relationInfo.sourceInfo.getEntityId(), relationInfo.relationId, id, true);
+    }
+
+    /**
+     * Like {@link #getRelationEntities(RelationInfo, long)}, but only returns the IDs of the target entities.
+     */
+    public long[] getRelationIds(RelationInfo<?, T> relationInfo, long id) {
+        return internalGetRelationIds(relationInfo.sourceInfo.getEntityId(), relationInfo.relationId, id, false);
+    }
+
+    /**
+     * Like {@link #getRelationBacklinkEntities(RelationInfo, long)}, but only returns the IDs of the source entities.
+     */
+    public long[] getRelationBacklinkIds(RelationInfo<T, ?> relationInfo, long id) {
+        return internalGetRelationIds(relationInfo.sourceInfo.getEntityId(), relationInfo.relationId, id, true);
     }
 
     @Internal

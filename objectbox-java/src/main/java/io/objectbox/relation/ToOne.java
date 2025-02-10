@@ -33,8 +33,9 @@ import io.objectbox.internal.ReflectionCache;
  * A to-relation is unidirectional: it points from the source entity to the target entity.
  * The target is referenced by its ID, which is persisted in the source entity.
  * <p>
- * If their is a backlink {@link ToMany} relation based on this to-one relation,
- * the ToMany object will not be notified/updated about changes done here (use {@link ToMany#reset()} if required).
+ * If there is a {@link ToMany} relation linking back to this to-one relation (@Backlink),
+ * the ToMany object will not be notified/updated about persisted changes here.
+ * Call {@link ToMany#reset()} so it will update when next accessed.
  */
 // TODO add more tests
 // TODO not exactly thread safe
@@ -43,11 +44,11 @@ public class ToOne<TARGET> implements Serializable {
     private static final long serialVersionUID = 5092547044335989281L;
 
     private final Object entity;
-    private final RelationInfo relationInfo;
+    private final RelationInfo<Object, TARGET> relationInfo;
     private final boolean virtualProperty;
 
     transient private BoxStore boxStore;
-    transient private Box entityBox;
+    transient private Box<Object> entityBox;
     transient private volatile Box<TARGET> targetBox;
     transient private Field targetIdField;
 
@@ -70,7 +71,8 @@ public class ToOne<TARGET> implements Serializable {
      * @param sourceEntity The source entity that owns the to-one relation.
      * @param relationInfo Meta info as generated in the Entity_ (entity name plus underscore) classes.
      */
-    public ToOne(Object sourceEntity, RelationInfo relationInfo) {
+    @SuppressWarnings("unchecked") // RelationInfo cast: ? is at least Object.
+    public ToOne(Object sourceEntity, RelationInfo<?, TARGET> relationInfo) {
         if (sourceEntity == null) {
             throw new IllegalArgumentException("No source entity given (null)");
         }
@@ -78,8 +80,8 @@ public class ToOne<TARGET> implements Serializable {
             throw new IllegalArgumentException("No relation info given (null)");
         }
         this.entity = sourceEntity;
-        this.relationInfo = relationInfo;
-        virtualProperty = relationInfo.targetIdProperty == null;
+        this.relationInfo = (RelationInfo<Object, TARGET>) relationInfo;
+        virtualProperty = relationInfo.targetIdProperty.isVirtual;
     }
 
     /**
@@ -106,27 +108,27 @@ public class ToOne<TARGET> implements Serializable {
         return targetNew;
     }
 
-    private void ensureBoxes(TARGET target) {
+    private void ensureBoxes(@Nullable TARGET target) {
         // Only check the property set last
         if (targetBox == null) {
             Field boxStoreField = ReflectionCache.getInstance().getField(entity.getClass(), "__boxStore");
             try {
                 boxStore = (BoxStore) boxStoreField.get(entity);
-                debugRelations = boxStore.isDebugRelations();
                 if (boxStore == null) {
                     if (target != null) {
                         boxStoreField = ReflectionCache.getInstance().getField(target.getClass(), "__boxStore");
                         boxStore = (BoxStore) boxStoreField.get(target);
                     }
                     if (boxStore == null) {
-                        throw new DbDetachedException("Cannot resolve relation for detached entities");
+                        throw new DbDetachedException("Cannot resolve relation for detached entities, " +
+                                "call box.attach(entity) beforehand.");
                     }
                 }
+                debugRelations = boxStore.isDebugRelations();
             } catch (IllegalAccessException e) {
                 throw new RuntimeException(e);
             }
             entityBox = boxStore.boxFor(relationInfo.sourceInfo.getEntityClass());
-            //noinspection unchecked
             targetBox = boxStore.boxFor(relationInfo.targetInfo.getEntityClass());
         }
     }
@@ -147,6 +149,14 @@ public class ToOne<TARGET> implements Serializable {
         return getTargetId() == 0 && target == null;
     }
 
+    /**
+     * Sets or clears the target ID in the source entity. Pass 0 to clear.
+     * <p>
+     * Put the source entity to persist changes.
+     * If the ID is not 0 creates a relation to the target entity with this ID, otherwise dissolves it.
+     *
+     * @see #setTarget
+     */
     public void setTargetId(long targetId) {
         if (virtualProperty) {
             this.targetId = targetId;
@@ -171,10 +181,13 @@ public class ToOne<TARGET> implements Serializable {
     }
 
     /**
-     * Sets the relation ID in the enclosed entity to the ID of the given target entity.
-     * If the target entity was not put in the DB yet (its ID is 0), it will be put before to get its ID.
+     * Sets or clears the target entity and ID in the source entity. Pass null to clear.
+     * <p>
+     * Put the source entity to persist changes.
+     * If the target entity was not put yet (its ID is 0), it will be stored when the source entity is put.
+     *
+     * @see #setTargetId
      */
-    // TODO provide a overload with a ToMany parameter, which also gets updated
     public void setTarget(@Nullable final TARGET target) {
         if (target != null) {
             long targetId = relationInfo.targetInfo.getIdGetter().getId(target);
@@ -188,10 +201,11 @@ public class ToOne<TARGET> implements Serializable {
     }
 
     /**
-     * Sets the relation ID in the enclosed entity to the ID of the given target entity and puts the enclosed entity.
-     * If the target entity was not put in the DB yet (its ID is 0), it will be put before to get its ID.
+     * Sets or clears the target entity and ID in the source entity, then puts the source entity to persist changes.
+     * Pass null to clear.
+     * <p>
+     * If the target entity was not put yet (its ID is 0), it will be put before the source entity.
      */
-    // TODO provide a overload with a ToMany parameter, which also gets updated
     public void setAndPutTarget(@Nullable final TARGET target) {
         ensureBoxes(target);
         if (target != null) {
@@ -211,19 +225,20 @@ public class ToOne<TARGET> implements Serializable {
     }
 
     /**
-     * Sets the relation ID in the enclosed entity to the ID of the given target entity and puts both entities.
+     * Sets or clears the target entity and ID in the source entity,
+     * then puts the target (if not null) and source entity to persist changes.
+     * Pass null to clear.
+     * <p>
+     * When clearing the target entity, this does not remove it from its box.
+     * This only dissolves the relation.
      */
-    // TODO provide a overload with a ToMany parameter, which also gets updated
     public void setAndPutTargetAlways(@Nullable final TARGET target) {
         ensureBoxes(target);
         if (target != null) {
-            boxStore.runInTx(new Runnable() {
-                @Override
-                public void run() {
-                    long targetKey = targetBox.put(target);
-                    setResolvedTarget(target, targetKey);
-                    entityBox.put(entity);
-                }
+            boxStore.runInTx(() -> {
+                long targetKey = targetBox.put(target);
+                setResolvedTarget(target, targetKey);
+                entityBox.put(entity);
             });
         } else {
             setTargetId(0);

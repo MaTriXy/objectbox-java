@@ -16,8 +16,16 @@
 
 package io.objectbox;
 
+/** In "real" entity would be annotated with @Entity. */
 public class TestEntity {
 
+    public static final String STRING_VALUE_THROW_IN_CONSTRUCTOR =
+            "Hey constructor, please throw an exception. Thank you!";
+
+    public static final String EXCEPTION_IN_CONSTRUCTOR_MESSAGE =
+            "Hello, this is an exception from TestEntity constructor";
+
+    /** In "real" entity would be annotated with @Id. */
     private long id;
     private boolean simpleBoolean;
     private byte simpleByte;
@@ -30,6 +38,12 @@ public class TestEntity {
     private String simpleString;
     /** Not-null value. */
     private byte[] simpleByteArray;
+    /** In "real" entity would be annotated with @Unsigned. */
+    private short simpleShortU;
+    /** In "real" entity would be annotated with @Unsigned. */
+    private int simpleIntU;
+    /** In "real" entity would be annotated with @Unsigned. */
+    private long simpleLongU;
 
     transient boolean noArgsConstructorCalled;
 
@@ -41,7 +55,7 @@ public class TestEntity {
         this.id = id;
     }
 
-    public TestEntity(long id, boolean simpleBoolean, byte simpleByte, short simpleShort, int simpleInt, long simpleLong, float simpleFloat, double simpleDouble, String simpleString, byte[] simpleByteArray) {
+    public TestEntity(long id, boolean simpleBoolean, byte simpleByte, short simpleShort, int simpleInt, long simpleLong, float simpleFloat, double simpleDouble, String simpleString, byte[] simpleByteArray, short simpleShortU, int simpleIntU, long simpleLongU) {
         this.id = id;
         this.simpleBoolean = simpleBoolean;
         this.simpleByte = simpleByte;
@@ -52,6 +66,12 @@ public class TestEntity {
         this.simpleDouble = simpleDouble;
         this.simpleString = simpleString;
         this.simpleByteArray = simpleByteArray;
+        this.simpleShortU = simpleShortU;
+        this.simpleIntU = simpleIntU;
+        this.simpleLongU = simpleLongU;
+        if (STRING_VALUE_THROW_IN_CONSTRUCTOR.equals(simpleString)) {
+            throw new RuntimeException(EXCEPTION_IN_CONSTRUCTOR_MESSAGE);
+        }
     }
 
     public long getId() {
@@ -138,4 +158,30 @@ public class TestEntity {
         this.simpleByteArray = simpleByteArray;
     }
 
+    public short getSimpleShortU() {
+        return simpleShortU;
+    }
+
+    public TestEntity setSimpleShortU(short simpleShortU) {
+        this.simpleShortU = simpleShortU;
+        return this;
+    }
+
+    public int getSimpleIntU() {
+        return simpleIntU;
+    }
+
+    public TestEntity setSimpleIntU(int simpleIntU) {
+        this.simpleIntU = simpleIntU;
+        return this;
+    }
+
+    public long getSimpleLongU() {
+        return simpleLongU;
+    }
+
+    public TestEntity setSimpleLongU(long simpleLongU) {
+        this.simpleLongU = simpleLongU;
+        return this;
+    }
 }

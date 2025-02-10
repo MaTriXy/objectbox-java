@@ -21,6 +21,8 @@ import com.google.flatbuffers.FlatBufferBuilder;
 import java.util.ArrayList;
 import java.util.List;
 
+import javax.annotation.Nullable;
+
 import io.objectbox.annotation.apihint.Internal;
 import io.objectbox.model.IdUid;
 import io.objectbox.model.Model;
@@ -29,6 +31,7 @@ import io.objectbox.model.ModelProperty;
 import io.objectbox.model.ModelRelation;
 
 // Remember: IdUid is a struct, not a table, and thus must be inlined
+@SuppressWarnings("WeakerAccess,UnusedReturnValue, unused")
 @Internal
 public class ModelBuilder {
     private static final int MODEL_VERSION = 2;
@@ -60,8 +63,9 @@ public class ModelBuilder {
         private long uid;
         private int indexId;
         private long indexUid;
+        private int indexMaxValueLength;
 
-        PropertyBuilder(String name, String targetEntityName, String virtualTarget, int type) {
+        PropertyBuilder(String name, @Nullable String targetEntityName, @Nullable String virtualTarget, int type) {
             this.type = type;
             propertyNameOffset = fbb.createString(name);
             targetEntityOffset = targetEntityName != null ? fbb.createString(targetEntityName) : 0;
@@ -82,6 +86,12 @@ public class ModelBuilder {
             return this;
         }
 
+        public PropertyBuilder indexMaxValueLength(int indexMaxValueLength) {
+            checkNotFinished();
+            this.indexMaxValueLength = indexMaxValueLength;
+            return this;
+        }
+
         public PropertyBuilder flags(int flags) {
             checkNotFinished();
             this.flags = flags;
@@ -90,9 +100,7 @@ public class ModelBuilder {
 
         public PropertyBuilder secondaryName(String secondaryName) {
             checkNotFinished();
-            if (secondaryName != null) {
-                secondaryNameOffset = fbb.createString(secondaryName);
-            }
+            secondaryNameOffset = fbb.createString(secondaryName);
             return this;
         }
 
@@ -123,6 +131,9 @@ public class ModelBuilder {
             if (indexId != 0) {
                 int indexIdOffset = IdUid.createIdUid(fbb, indexId, indexUid);
                 ModelProperty.addIndexId(fbb, indexIdOffset);
+            }
+            if (indexMaxValueLength > 0) {
+                ModelProperty.addMaxIndexValueLength(fbb, indexMaxValueLength);
             }
             ModelProperty.addType(fbb, type);
             if (flags != 0) {
@@ -178,11 +189,12 @@ public class ModelBuilder {
             return property(name, null, type);
         }
 
-        public PropertyBuilder property(String name, String targetEntityName, int type) {
+        public PropertyBuilder property(String name, @Nullable String targetEntityName, int type) {
             return property(name, targetEntityName, null, type);
         }
 
-        public PropertyBuilder property(String name, String targetEntityName, String virtualTarget, int type) {
+        public PropertyBuilder property(String name, @Nullable String targetEntityName, @Nullable String virtualTarget,
+                                        int type) {
             checkNotFinished();
             checkFinishProperty();
             propertyBuilder = new PropertyBuilder(name, targetEntityName, virtualTarget, type);
@@ -226,7 +238,7 @@ public class ModelBuilder {
             ModelEntity.addName(fbb, testEntityNameOffset);
             ModelEntity.addProperties(fbb, propertiesOffset);
             if (relationsOffset != 0) ModelEntity.addRelations(fbb, relationsOffset);
-            if (id != null || uid != null) {
+            if (id != null && uid != null) {
                 int idOffset = IdUid.createIdUid(fbb, id, uid);
                 ModelEntity.addId(fbb, idOffset);
             }

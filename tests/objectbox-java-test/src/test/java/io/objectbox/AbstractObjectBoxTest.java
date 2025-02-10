@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2018 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -38,6 +38,8 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public abstract class AbstractObjectBoxTest {
+    private static boolean printedVersionsOnce;
+
     protected File boxStoreDir;
     protected BoxStore store;
     protected Random random = new Random();
@@ -58,6 +60,14 @@ public abstract class AbstractObjectBoxTest {
         File tempFile = File.createTempFile("object-store-test", "");
         tempFile.delete();
         boxStoreDir = tempFile;
+
+        if (!printedVersionsOnce) {
+            System.out.println("ObjectBox Java version: " + BoxStore.getVersion());
+            System.out.println("ObjectBox Core version: " + BoxStore.getVersionNative());
+            System.out.println("First DB dir: " + boxStoreDir);
+            printedVersionsOnce = true;
+        }
+
         store = createBoxStore();
         runExtensiveTests = System.getProperty("extensive-tests") != null;
     }
@@ -72,6 +82,7 @@ public abstract class AbstractObjectBoxTest {
 
     protected BoxStoreBuilder createBoxStoreBuilderWithTwoEntities(boolean withIndex) {
         BoxStoreBuilder builder = new BoxStoreBuilder(createTestModelWithTwoEntities(withIndex)).directory(boxStoreDir);
+        builder.debugFlags(DebugFlags.LOG_TRANSACTIONS_READ | DebugFlags.LOG_TRANSACTIONS_WRITE);
         builder.entity(new TestEntity_());
         builder.entity(new TestEntityMinimal_());
         return builder;
@@ -79,6 +90,7 @@ public abstract class AbstractObjectBoxTest {
 
     protected BoxStoreBuilder createBoxStoreBuilder(boolean withIndex) {
         BoxStoreBuilder builder = new BoxStoreBuilder(createTestModel(withIndex)).directory(boxStoreDir);
+        builder.debugFlags(DebugFlags.LOG_TRANSACTIONS_READ | DebugFlags.LOG_TRANSACTIONS_WRITE);
         builder.entity(new TestEntity_());
         return builder;
     }
@@ -88,7 +100,7 @@ public abstract class AbstractObjectBoxTest {
     }
 
     @After
-    public void tearDown() throws Exception {
+    public void tearDown() {
         // Collect dangling Cursors and TXs before store closes
         System.gc();
         System.runFinalization();
@@ -185,7 +197,16 @@ public abstract class AbstractObjectBoxTest {
             pb.flags(PropertyFlags.INDEXED).indexId(++lastIndexId, lastIndexUid);
         }
         entityBuilder.property("simpleByteArray", PropertyType.ByteVector).id(TestEntity_.simpleByteArray.id, ++lastUid);
-        int lastId = TestEntity_.simpleByteArray.id;
+
+        // Unsigned integers.
+        entityBuilder.property("simpleShortU", PropertyType.Short).id(TestEntity_.simpleShortU.id, ++lastUid)
+                .flags(PropertyFlags.UNSIGNED);
+        entityBuilder.property("simpleIntU", PropertyType.Int).id(TestEntity_.simpleIntU.id, ++lastUid)
+                .flags(PropertyFlags.UNSIGNED);
+        entityBuilder.property("simpleLongU", PropertyType.Long).id(TestEntity_.simpleLongU.id, ++lastUid)
+                .flags(PropertyFlags.UNSIGNED);
+
+        int lastId = TestEntity_.simpleLongU.id;
         entityBuilder.lastPropertyId(lastId, lastUid);
         addOptionalFlagsToTestEntity(entityBuilder);
         entityBuilder.entityDone();
@@ -219,6 +240,10 @@ public abstract class AbstractObjectBoxTest {
         entity.setSimpleLong(1000 + nr);
         entity.setSimpleFloat(200 + nr / 10f);
         entity.setSimpleDouble(2000 + nr / 100f);
+        entity.setSimpleByteArray(new byte[]{1, 2, (byte) nr});
+        entity.setSimpleShortU((short) (100 + nr));
+        entity.setSimpleIntU(nr);
+        entity.setSimpleLongU(1000 + nr);
         return entity;
     }
 

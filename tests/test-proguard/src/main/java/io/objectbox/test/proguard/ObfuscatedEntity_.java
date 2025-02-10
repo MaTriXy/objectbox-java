@@ -48,19 +48,20 @@ public final class ObfuscatedEntity_ implements EntityInfo<ObfuscatedEntity> {
     @Internal
     static final ObfuscatedEntityIdGetter __ID_GETTER = new ObfuscatedEntityIdGetter();
 
-    public final static Property id = new Property(0, 1, long.class, "id", true, "id");
-    public final static Property myInt = new Property(1, 2, int.class, "myInt");
-    public final static Property myString = new Property(2, 3, String.class, "myString");
+    public final static ObfuscatedEntity_ __INSTANCE = new ObfuscatedEntity_();
 
-    public final static Property[] __ALL_PROPERTIES = {
+    public final static Property<ObfuscatedEntity> id = new Property<>(__INSTANCE, 0, 1, long.class, "id", true, "id");
+    public final static Property<ObfuscatedEntity> myInt = new Property<>(__INSTANCE, 1, 2, int.class, "myInt");
+    public final static Property<ObfuscatedEntity> myString = new Property<>(__INSTANCE, 2, 3, String.class, "myString");
+
+    @SuppressWarnings("unchecked")
+    public final static Property<ObfuscatedEntity>[] __ALL_PROPERTIES = new Property[]{
         id,
         myInt,
         myString
     };
 
-    public final static Property __ID_PROPERTY = id;
-
-    public final static ObfuscatedEntity_ __INSTANCE = new ObfuscatedEntity_();
+    public final static Property<ObfuscatedEntity> __ID_PROPERTY = id;
 
     @Override
     public String getEntityName() {
@@ -83,12 +84,12 @@ public final class ObfuscatedEntity_ implements EntityInfo<ObfuscatedEntity> {
     }
 
     @Override
-    public Property[] getAllProperties() {
+    public Property<ObfuscatedEntity>[] getAllProperties() {
         return __ALL_PROPERTIES;
     }
 
     @Override
-    public Property getIdProperty() {
+    public Property<ObfuscatedEntity> getIdProperty() {
         return __ID_PROPERTY;
     }
 

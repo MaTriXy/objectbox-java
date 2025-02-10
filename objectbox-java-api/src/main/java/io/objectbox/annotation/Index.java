@@ -1,5 +1,5 @@
 /*
- * Copyright 2017 ObjectBox Ltd. All rights reserved.
+ * Copyright 2017-2018 ObjectBox Ltd. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,13 +22,19 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Specifies that the property should be indexed, which is highly recommended if you do queries using this property.
+ * Specifies that the property should be indexed.
+ * <p>
+ * It is highly recommended to index properties that are used in a query to improve query performance.
+ * <p>
+ * To fine tune indexing of a property you can override the default index {@link #type()}.
+ * <p>
+ * Note: indexes are currently not supported for byte array, float or double properties.
  */
 @Retention(RetentionPolicy.CLASS)
 @Target(ElementType.FIELD)
 public @interface Index {
-//    /**
-//     * Whether the unique constraint should be created with base on this index
-//     */
-//    boolean unique() default false;
+    /**
+     * Sets the {@link IndexType}, defaults to {@link IndexType#DEFAULT}.
+     */
+    IndexType type() default IndexType.DEFAULT;
 }

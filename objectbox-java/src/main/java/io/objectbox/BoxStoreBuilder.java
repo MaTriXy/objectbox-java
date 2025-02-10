@@ -22,12 +22,12 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 
 import javax.annotation.Nonnull;
@@ -66,6 +66,10 @@ public class BoxStoreBuilder {
     /** BoxStore uses this */
     File directory;
 
+    /** On Android used for native library loading. */
+    @Nullable Object context;
+    @Nullable Object relinker;
+
     /** Ignored by BoxStore */
     private File baseDirectory;
 
@@ -87,9 +91,9 @@ public class BoxStoreBuilder {
 
     int queryAttempts;
 
-    TxCallback failedReadTxAttemptCallback;
+    TxCallback<?> failedReadTxAttemptCallback;
 
-    final List<EntityInfo> entityInfoList = new ArrayList<>();
+    final List<EntityInfo<?>> entityInfoList = new ArrayList<>();
     private Factory<InputStream> initialDbFileFactory;
 
     /** Not for application use. */
@@ -101,13 +105,14 @@ public class BoxStoreBuilder {
         model = null;
     }
 
-    @Internal
     /** Called internally from the generated class "MyObjectBox". Check MyObjectBox.builder() to get an instance. */
+    @Internal
     public BoxStoreBuilder(byte[] model) {
-        this.model = model;
         if (model == null) {
             throw new IllegalArgumentException("Model may not be null");
         }
+        // Future-proofing: copy to prevent external modification.
+        this.model = Arrays.copyOf(model, model.length);
     }
 
     /**
@@ -171,9 +176,12 @@ public class BoxStoreBuilder {
      * Alternatively, you can also use {@link #baseDirectory} or {@link #directory(File)} instead.
      */
     public BoxStoreBuilder androidContext(Object context) {
+        //noinspection ConstantConditions Annotation does not enforce non-null.
         if (context == null) {
             throw new NullPointerException("Context may not be null");
         }
+        this.context = getApplicationContext(context);
+
         File baseDir = getAndroidBaseDir(context);
         if (!baseDir.exists()) {
             baseDir.mkdir();
@@ -186,6 +194,31 @@ public class BoxStoreBuilder {
         }
         baseDirectory = baseDir;
         android = true;
+        return this;
+    }
+
+    private Object getApplicationContext(Object context) {
+        try {
+            return context.getClass().getMethod("getApplicationContext").invoke(context);
+        } catch (Exception e) {
+            // note: can't catch ReflectiveOperationException, is K+ (19+) on Android
+            throw new RuntimeException("context must be a valid Android Context", e);
+        }
+    }
+
+    /**
+     * Pass a custom ReLinkerInstance, for example {@code ReLinker.log(logger)} to use for loading the native library
+     * on Android devices. Note that setting {@link #androidContext(Object)} is required for ReLinker to work.
+     */
+    public BoxStoreBuilder androidReLinker(Object reLinkerInstance) {
+        if (context == null) {
+            throw new IllegalArgumentException("Set a Context using androidContext(context) first");
+        }
+        //noinspection ConstantConditions Annotation does not enforce non-null.
+        if (reLinkerInstance == null) {
+            throw new NullPointerException("ReLinkerInstance may not be null");
+        }
+        this.relinker = reLinkerInstance;
         return this;
     }
 
@@ -227,7 +260,7 @@ public class BoxStoreBuilder {
     }
 
     /**
-     * Sets the maximum number of concurrent readers. For most applications, the default is fine (> 100 readers).
+     * Sets the maximum number of concurrent readers. For most applications, the default is fine (&gt; 100 readers).
      * <p>
      * A "reader" is short for a thread involved in a read transaction.
      * <p>
@@ -243,7 +276,7 @@ public class BoxStoreBuilder {
     }
 
     @Internal
-    public void entity(EntityInfo entityInfo) {
+    public void entity(EntityInfo<?> entityInfo) {
         entityInfoList.add(entityInfo);
     }
 
@@ -266,8 +299,10 @@ public class BoxStoreBuilder {
         return this;
     }
 
+    /**
+     * @deprecated Use {@link #debugFlags} instead.
+     */
     @Deprecated
-    /** @deprecated Use {@link #debugFlags} instead. */
     public BoxStoreBuilder debugTransactions() {
         this.debugFlags |= DebugFlags.LOG_TRANSACTIONS_READ | DebugFlags.LOG_TRANSACTIONS_WRITE;
         return this;
@@ -312,7 +347,7 @@ public class BoxStoreBuilder {
      * Useful for e.g. logging.
      */
     @Experimental
-    public BoxStoreBuilder failedReadTxAttemptCallback(TxCallback failedReadTxAttemptCallback) {
+    public BoxStoreBuilder failedReadTxAttemptCallback(TxCallback<?> failedReadTxAttemptCallback) {
         this.failedReadTxAttemptCallback = failedReadTxAttemptCallback;
         return this;
     }
@@ -322,12 +357,7 @@ public class BoxStoreBuilder {
      */
     @Experimental
     public BoxStoreBuilder initialDbFile(final File initialDbFile) {
-        return initialDbFile(new Factory<InputStream>() {
-            @Override
-            public InputStream provide() throws FileNotFoundException {
-                return new FileInputStream(initialDbFile);
-            }
-        });
+        return initialDbFile(() -> new FileInputStream(initialDbFile));
     }
 
     /**

@@ -1,9 +1,16 @@
 <img width="466" src="https://raw.githubusercontent.com/objectbox/objectbox-java/master/logo.png">
 
-# ObjectBox Java (Kotlin, Android)
-ObjectBox is a superfast object-oriented database with strong relation support. ObjectBox is embedded into your Android, Linux, macOS, or Windows app.
+# Do you ♥️ using ObjectBox?
+[![Follow ObjectBox on Twitter](https://img.shields.io/twitter/follow/ObjectBox_io.svg?style=flat-square&logo=twitter&color=fff)](https://twitter.com/ObjectBox_io)
 
-**Latest version: [1.5.0 (2018/04/17)](http://objectbox.io/changelog)**
+We want to [hear about your app](https://docs.google.com/forms/d/e/1FAIpQLScIYiOIThcq-AnDVoCvnZOMgxO4S-fBtDSFPQfWldJnhi2c7Q/viewform)!
+It will - literally - take just a minute, but help us a lot. Thank you!​ 🙏​
+
+# ObjectBox Java (Kotlin, Android)
+ObjectBox is a superfast object-oriented database with strong relation support.
+ObjectBox is embedded into your Android, Linux, macOS, or Windows app.
+
+**Latest version: [2.6.0 (2020/06/09)](https://docs.objectbox.io/#objectbox-changelog)**
 
 Demo code using ObjectBox:
 
@@ -14,13 +21,23 @@ playlist.songs.add(new Song("Lololo"));
 box.put(playlist);
 ```
 
+Other languages/bindings
+------------------------
+ObjectBox supports multiple platforms and languages.
+Besides JVM based languages like Java and Kotlin, ObjectBox also offers: 
+
+* [ObjectBox Swift](https://github.com/objectbox/objectbox-swift): build fast mobile apps for iOS (and macOS) 
+* [ObjectBox Dart/Flutter](https://github.com/objectbox/objectbox-dart): cross-plattform for mobile and desktop apps (beta) 
+* [ObjectBox Go](https://github.com/objectbox/objectbox-go): great for data-driven tools and small server applications 
+* [ObjectBox C API](https://github.com/objectbox/objectbox-c): native speed with zero copy access to FlatBuffer objects
+
 Gradle setup
 ------------
 Add this to your root build.gradle (project level): 
 
 ```groovy
 buildscript {
-    ext.objectboxVersion = '1.5.0'
+    ext.objectboxVersion = '2.6.0'
     dependencies {
         classpath "io.objectbox:objectbox-gradle-plugin:$objectboxVersion"
     }
@@ -59,13 +76,12 @@ For details please check the [docs](http://objectbox.io/documentation/).
 
 Links
 -----
-[Features](http://objectbox.io/features/)
+[Features](https://objectbox.io/features/)
 
-[Documentation](http://objectbox.io/documentation/)
+[Docs & Changelog](https://docs.objectbox.io/), [JavaDocs](https://objectbox.io/docfiles/java/current/)
 
 [Examples](https://github.com/objectbox/objectbox-examples)
 
-[Changelog](http://objectbox.io/changelog/)
 
 We love to get your feedback
 ----------------------------
@@ -75,7 +91,7 @@ Thanks!
 
 License
 -------
-    Copyright 2017-2018 ObjectBox Ltd. All rights reserved.
+    Copyright 2017-2020 ObjectBox Ltd. All rights reserved.
     
     Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.

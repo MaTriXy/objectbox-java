@@ -17,6 +17,8 @@ package io.objectbox.query;
 
 import java.util.Date;
 
+import javax.annotation.Nullable;
+
 import io.objectbox.Property;
 import io.objectbox.annotation.apihint.Experimental;
 import io.objectbox.annotation.apihint.Internal;
@@ -42,12 +44,12 @@ public interface QueryCondition {
         public final Object value;
         protected final Object[] values;
 
-        public AbstractCondition(Object value) {
+        AbstractCondition(Object value) {
             this.value = value;
             this.values = null;
         }
 
-        public AbstractCondition(Object[] values) {
+        AbstractCondition(@Nullable Object[] values) {
             this.value = null;
             this.values = values;
         }
@@ -73,13 +75,13 @@ public interface QueryCondition {
         public final Property property;
         private final Operation operation;
 
-        public PropertyCondition(Property property, Operation operation, Object value) {
+        public PropertyCondition(Property property, Operation operation, @Nullable Object value) {
             super(checkValueForType(property, value));
             this.property = property;
             this.operation = operation;
         }
 
-        public PropertyCondition(Property property, Operation operation, Object[] values) {
+        public PropertyCondition(Property property, Operation operation, @Nullable Object[] values) {
             super(checkValuesForType(property, operation, values));
             this.property = property;
             this.operation = operation;
@@ -166,7 +168,7 @@ public interface QueryCondition {
             }
         }
 
-        private static Object checkValueForType(Property property, Object value) {
+        private static Object checkValueForType(Property property, @Nullable Object value) {
             if (value != null && value.getClass().isArray()) {
                 throw new DbException("Illegal value: found array, but simple object required");
             }
@@ -203,7 +205,7 @@ public interface QueryCondition {
             return value;
         }
 
-        private static Object[] checkValuesForType(Property property, Operation operation, Object[] values) {
+        private static Object[] checkValuesForType(Property property, Operation operation, @Nullable Object[] values) {
             if (values == null) {
                 if (operation == Operation.IS_NULL || operation == Operation.IS_NOT_NULL) {
                     return null;

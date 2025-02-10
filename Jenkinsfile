@@ -2,12 +2,36 @@
 String cronSchedule = BRANCH_NAME == 'dev' ? '*/30 1-5 * * *' : ''
 String buildsToKeep = '500'
 
+String gradleArgs = '-Dorg.gradle.daemon=false --stacktrace'
+boolean isPublish = BRANCH_NAME == 'publish'
+String versionPostfix = isPublish ? '' : BRANCH_NAME // Build script detects empty string as not set.
+
 // https://jenkins.io/doc/book/pipeline/syntax/
 pipeline {
-    agent any
+    agent { label 'java' }
+    
+    environment {
+        GITLAB_URL = credentials('gitlab_url')
+        MVN_REPO_LOGIN = credentials('objectbox_internal_mvn_user')
+        MVN_REPO_URL = credentials('objectbox_internal_mvn_repo_http')
+        MVN_REPO_ARGS = "-PinternalObjectBoxRepo=$MVN_REPO_URL " +
+                        "-PinternalObjectBoxRepoUser=$MVN_REPO_LOGIN_USR " +
+                        "-PinternalObjectBoxRepoPassword=$MVN_REPO_LOGIN_PSW"
+        MVN_REPO_UPLOAD_URL = credentials('objectbox_internal_mvn_repo')
+        MVN_REPO_UPLOAD_ARGS = "-PpreferredRepo=$MVN_REPO_UPLOAD_URL " +
+                        "-PpreferredUsername=$MVN_REPO_LOGIN_USR " +
+                        "-PpreferredPassword=$MVN_REPO_LOGIN_PSW " +
+                        "-PversionPostFix=$versionPostfix"
+        // Note: for key use Jenkins secret file with PGP key as text in ASCII-armored format.
+        ORG_GRADLE_PROJECT_signingKeyFile = credentials('objectbox_signing_key')
+        ORG_GRADLE_PROJECT_signingKeyId = credentials('objectbox_signing_key_id')
+        ORG_GRADLE_PROJECT_signingPassword = credentials('objectbox_signing_key_password')
+    }
 
     options {
         buildDiscarder(logRotator(numToKeepStr: buildsToKeep, artifactNumToKeepStr: buildsToKeep))
+        timeout(time: 1, unit: 'HOURS') // If build hangs (regular build should be much quicker)
+        gitLabConnection("${env.GITLAB_URL}")
     }
 
     triggers {
@@ -19,10 +43,9 @@ pipeline {
     stages {
         stage('init') {
             steps {
-                // Copied file exists on CI server only
-                sh 'cp /var/my-private-files/private.properties ./gradle.properties'
-
                 sh 'chmod +x gradlew'
+                sh 'chmod +x ci/test-with-asan.sh'
+                sh './gradlew -version'
 
                 // "|| true" for an OK exit code if no file is found
                 sh 'rm tests/objectbox-java-test/hs_err_pid*.log || true'
@@ -31,35 +54,39 @@ pipeline {
 
         stage('build-java') {
             steps {
-                sh './test-with-asan.sh -Dextensive-tests=true clean test --tests io.objectbox.FunctionalTestSuite --tests io.objectbox.test.proguard.ObfuscatedEntityTest assemble'
+                sh "./ci/test-with-asan.sh $gradleArgs $MVN_REPO_ARGS -Dextensive-tests=true clean test " +
+                        "--tests io.objectbox.FunctionalTestSuite " +
+                        "--tests io.objectbox.test.proguard.ObfuscatedEntityTest " +
+                        "--tests io.objectbox.rx.QueryObserverTest " +
+                        "--tests io.objectbox.rx3.QueryObserverTest " +
+                        "spotbugsMain assemble"
             }
         }
 
-        stage('upload-to-repo') {
-            // By default, only dev and master branches deploy to repo to avoid messing in the same SNAPSHOT version
-            // (e.g. this avoids integration tests to pick it up the version).
-            when { expression { return BRANCH_NAME == 'dev' || BRANCH_NAME == 'master' } }
+        stage('upload-to-internal') {
             steps {
-                sh './gradlew --stacktrace -PpreferedRepo=local uploadArchives'
+                sh "./gradlew $gradleArgs $MVN_REPO_ARGS $MVN_REPO_UPLOAD_ARGS uploadArchives"
             }
         }
 
         stage('upload-to-bintray') {
-            when { expression { return BRANCH_NAME == 'publish' } }
+            when { expression { return isPublish } }
             environment {
                 BINTRAY_URL = credentials('bintray_url')
                 BINTRAY_LOGIN = credentials('bintray_login')
             }
             steps {
-                script {
-                    slackSend color: "#42ebf4",
-                            message: "Publishing ${currentBuild.fullDisplayName} to Bintray...\n${env.BUILD_URL}"
-                }
-                sh './gradlew --stacktrace -PpreferedRepo=${BINTRAY_URL} -PpreferedUsername=${BINTRAY_LOGIN_USR} -PpreferedPassword=${BINTRAY_LOGIN_PSW} uploadArchives'
-                script {
-                    slackSend color: "##41f4cd",
-                            message: "Published ${currentBuild.fullDisplayName} successfully to Bintray - check https://bintray.com/objectbox/objectbox\n${env.BUILD_URL}"
-                }
+                googlechatnotification url: 'id:gchat_java',
+                    message: "*Publishing* ${currentBuild.fullDisplayName} to Bintray...\n${env.BUILD_URL}"
+
+                // Note: supply internal Maven repo as tests use native dependencies (can't publish those without the Java libraries).
+                // Note: add quotes around URL parameter to avoid line breaks due to semicolon in URL.
+                sh "./gradlew $gradleArgs $MVN_REPO_ARGS " +
+                   "\"-PpreferredRepo=${BINTRAY_URL}\" -PpreferredUsername=${BINTRAY_LOGIN_USR} -PpreferredPassword=${BINTRAY_LOGIN_PSW} " +
+                   "uploadArchives"
+
+                googlechatnotification url: 'id:gchat_java',
+                    message: "Published ${currentBuild.fullDisplayName} successfully to Bintray - check https://bintray.com/objectbox/objectbox\n${env.BUILD_URL}"
             }
         }
 
@@ -69,18 +96,33 @@ pipeline {
     post {
         always {
             junit '**/build/test-results/**/TEST-*.xml'
-            archive 'tests/*/hs_err_pid*.log'
-            archive '**/build/reports/findbugs/*'
-        }
+            archiveArtifacts artifacts: 'tests/*/hs_err_pid*.log', allowEmptyArchive: true  // Only on JVM crash.
+            recordIssues(tool: spotBugs(pattern: '**/build/reports/spotbugs/*.xml', useRankAsPriority: true))
 
-        changed {
-            slackSend color: "good",
-                    message: "Changed to ${currentBuild.currentResult}: ${currentBuild.fullDisplayName}\n${env.BUILD_URL}"
+            googlechatnotification url: 'id:gchat_java', message: "${currentBuild.currentResult}: ${currentBuild.fullDisplayName}\n${env.BUILD_URL}",
+                                   notifyFailure: 'true', notifyUnstable: 'true', notifyBackToNormal: 'true'
         }
 
         failure {
-            slackSend color: "danger",
-                    message: "Failed: ${currentBuild.fullDisplayName}\n${env.BUILD_URL}"
+            updateGitlabCommitStatus name: 'build', state: 'failed'
+
+            emailext (
+                subject: "${currentBuild.currentResult}: ${currentBuild.fullDisplayName}",
+                mimeType: 'text/html',
+                recipientProviders: [[$class: 'DevelopersRecipientProvider']],
+                body: """
+                    <p>${currentBuild.currentResult}:
+                        <a href='${env.BUILD_URL}'>${currentBuild.fullDisplayName}</a>
+                        (<a href='${env.BUILD_URL}/console'>console</a>)
+                    </p>
+                    <p>Git: ${GIT_COMMIT} (${GIT_BRANCH})
+                    <p>Build time: ${currentBuild.durationString}
+                """
+            )
+        }
+
+        success {
+            updateGitlabCommitStatus name: 'build', state: 'success'
         }
     }
 }
